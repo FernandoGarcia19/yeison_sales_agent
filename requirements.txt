@@ -21,3 +21,20 @@ structlog==23.2.0
 # Security (for future authentication)
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+
+# Database
+sqlalchemy==2.0.23
+asyncpg==0.29.0
+alembic==1.13.0
+
+# Messaging & Communication
+twilio==8.11.0
+
+# Caching
+redis==5.0.1
+
+# AI/LLM
+openai==1.6.1
+
+# Background Tasks
+celery==5.3.4

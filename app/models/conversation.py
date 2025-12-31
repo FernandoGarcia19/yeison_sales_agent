@@ -33,7 +33,7 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
         index=True
     )
     external_user_id: Mapped[int] = mapped_column(
-        BigInteger,
+        String(15),
         nullable=False,
         comment="WhatsApp user identifier or lead_id"
     )

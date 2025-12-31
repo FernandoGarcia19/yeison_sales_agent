@@ -155,6 +155,7 @@ class ResponseGeneratorStage(BasePipelineStage):
         from app.core.database import get_session_factory
         from app.models import SalesConversation
         from sqlalchemy import select
+        from sqlalchemy.orm import attributes
         
         session_factory = get_session_factory()
         async with session_factory() as db:
@@ -181,6 +182,9 @@ class ResponseGeneratorStage(BasePipelineStage):
                     message_sid=context.action_result.get("message_sid") if context.action_result else None,
                     action_type=context.action_type
                 )
+                
+                # Mark the messages field as modified so SQLAlchemy detects the change
+                attributes.flag_modified(conversation, "messages")
                 
                 await db.commit()
                 

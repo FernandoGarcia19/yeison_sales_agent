@@ -73,7 +73,6 @@ class IdentificationStage(BasePipelineStage):
                 })
                 
                 # Also cache tenant-scoped agent data for other lookups
-                from app.core.redis_client import build_agent_cache_key
                 tenant_agent_key = build_agent_cache_key(agent.tenant_id, agent.id)
                 await cache_set(tenant_agent_key, {
                     "id": agent.id,
@@ -140,9 +139,8 @@ class IdentificationStage(BasePipelineStage):
         In future, you might want to create new conversations after timeout or explicit reset.
         """
         
-        # Hash the sender phone to use as external_user_id
-        # In production, you might want to link this to a Lead ID
-        external_user_id = hash(sender_phone) % (10 ** 8)  # Simple hash for now
+        
+        external_user_id = sender_phone
         
         stmt = select(SalesConversation).where(
             SalesConversation.agent_instance_id == agent_instance_id,

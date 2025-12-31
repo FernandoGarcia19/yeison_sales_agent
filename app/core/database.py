@@ -38,16 +38,26 @@ def get_engine() -> AsyncEngine:
         elif not db_url.startswith("postgresql+asyncpg://"):
             raise ValueError("Database URL must start with 'postgresql://' or 'postgresql+asyncpg://'")
         
-        # Create engine with connection pooling
-        _engine = create_async_engine(
-            db_url,
-            echo=settings.debug,  # Log SQL queries in debug mode
-            poolclass=QueuePool if not settings.debug else NullPool,
-            pool_size=settings.database_pool_size,
-            max_overflow=settings.database_max_overflow,
-            pool_timeout=settings.database_pool_timeout,
-            pool_pre_ping=True,  # Verify connections before using
-        )
+        # Build engine kwargs based on debug mode
+        engine_kwargs = {
+            "echo": settings.debug,  # Log SQL queries in debug mode
+        }
+        
+        if settings.debug:
+            # NullPool for debug mode - no pooling parameters
+            engine_kwargs["poolclass"] = NullPool
+        else:
+            # QueuePool for production with pooling parameters
+            engine_kwargs.update({
+                "poolclass": QueuePool,
+                "pool_size": settings.database_pool_size,
+                "max_overflow": settings.database_max_overflow,
+                "pool_timeout": settings.database_pool_timeout,
+                "pool_pre_ping": True,  # Verify connections before using
+            })
+        
+        # Create engine
+        _engine = create_async_engine(db_url, **engine_kwargs)
     
     return _engine
 

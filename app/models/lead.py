@@ -47,7 +47,6 @@ class Lead(Base, TimestampMixin, ActiveMixin):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="new")
     score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    lead_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     last_contact: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     converted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     

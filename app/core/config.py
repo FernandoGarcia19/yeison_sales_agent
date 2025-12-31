@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     openai_temperature: float = 0.7
     openai_max_tokens: int = 500
     
+    # OpenRouter settings (for testing, compatible with OpenAI SDK)
+    use_openrouter: bool = False  # Set to True to use OpenRouter instead of OpenAI
+    openrouter_api_key: Optional[str] = None
+    openrouter_model: str = "openai/gpt-3.5-turbo"  # Model to use with OpenRouter
+    
     # Main Backend API settings (for mutations)
     backend_api_url: Optional[str] = None
     backend_api_key: Optional[str] = None

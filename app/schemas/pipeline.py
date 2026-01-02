@@ -18,7 +18,7 @@ class IntentType(str, Enum):
     PURCHASE_INTENT = "purchase_intent"
     OBJECTION = "objection"
     COMPLAINT = "complaint"
-    SUPPORT_REQUEST = "support_request"
+    HANDOFF_REQUEST = "handoff_request"
     CLOSING = "closing"
     GENERAL_QUESTION = "general_question"
     UNKNOWN = "unknown"

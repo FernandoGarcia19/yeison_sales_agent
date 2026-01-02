@@ -122,7 +122,7 @@ INTENCIONES DISPONIBLES:
 - purchase_intent: Intención de compra, hacer un pedido ("quiero comprar", "me interesa", "lo quiero", "hacer un pedido")
 - objection: Objeciones, dudas sobre la compra ("es muy caro", "no estoy seguro", "necesito pensarlo")
 - complaint: Quejas, reclamos, insatisfacción ("no llegó mi pedido", "está defectuoso", "quiero mi dinero")
-- support_request: Solicitudes de ayuda, soporte ("tengo un problema", "necesito ayuda", "cómo funciona")
+- handoff_request: El usuario pide o requiere de la asistencia de un humano 
 - closing: Despedidas, fin de conversación ("gracias", "adiós", "hasta luego", "chao")
 - general_question: Preguntas generales que no encajan en otras categorías
 - unknown: Mensajes confusos o que no se pueden clasificar claramente

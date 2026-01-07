@@ -229,9 +229,19 @@ async def _process_batch(agent_phone: str, user_phone: str):
         result = await runner.run(context)
         
         if result.success:
-            logger.info(f"Batch processed successfully: {result.message}")
+            logger.info(
+                f"Batch processed successfully",
+                message_sid=result.message_sid,
+                intent=result.intent,
+                action=result.action_executed,
+                response_sent=result.response_sent
+            )
         else:
-            logger.error(f"Batch processing failed: {result.message}")
+            logger.error(
+                f"Batch processing failed",
+                message_sid=result.message_sid,
+                error=result.error
+            )
     
     except Exception as e:
         logger.error(f"Error processing batch: {e}", exc_info=True)

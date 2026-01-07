@@ -403,6 +403,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         
         from app.core.database import get_session_factory
         from app.models import SalesConversation
+        from app.core.redis_client import cache_delete, build_conversation_cache_key
         from sqlalchemy import select
         from sqlalchemy.orm import attributes
         
@@ -415,16 +416,33 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
             conversation = result.scalar_one_or_none()
             
             if conversation:
-                # Add user message
-                conversation.add_message(
-                    role="user",
-                    content=context.message_body,
-                    message_sid=context.message_sid,
-                    intent=context.intent.value if context.intent else None,
-                    intent_confidence=context.intent_confidence
-                )
+                # For batched messages, save all user messages individually
+                if context.is_batch and context.batch_messages:
+                    for msg in context.batch_messages:
+                        conversation.add_message(
+                            role="user",
+                            content=msg.get("body", ""),
+                            message_sid=msg.get("message_sid"),
+                            intent=context.intent.value if context.intent else None,
+                            intent_confidence=context.intent_confidence
+                        )
+                    
+                    self.log_info(
+                        "batch_messages_saved",
+                        count=len(context.batch_messages),
+                        conversation_id=context.conversation_id
+                    )
+                else:
+                    # Single message - original behavior
+                    conversation.add_message(
+                        role="user",
+                        content=context.message_body,
+                        message_sid=context.message_sid,
+                        intent=context.intent.value if context.intent else None,
+                        intent_confidence=context.intent_confidence
+                    )
                 
-                # Add assistant response
+                # Add single assistant response (whether batch or not)
                 conversation.add_message(
                     role="assistant",
                     content=context.response_text,
@@ -437,8 +455,13 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
                 
                 await db.commit()
                 
+                # Invalidate cached conversation history
+                cache_key = build_conversation_cache_key(context.tenant_id, context.conversation_id)
+                await cache_delete(cache_key)
+                
                 self.log_info(
                     "messages_saved_to_conversation",
                     conversation_id=context.conversation_id,
-                    total_messages=conversation.message_count
+                    total_messages=conversation.message_count,
+                    cache_invalidated=True
                 )

@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     redis_url: Optional[str] = None
     redis_ttl: int = 3600  # 1 hour default TTL for cached data
     
+    # Message batching settings
+    batch_enabled: bool = True  # Enable/disable message batching
+    batch_window_seconds: int = 3  # Wait time to collect multiple messages
+    batch_max_messages: int = 5  # Maximum messages per batch (fire early if reached)
+    
     # AI/LLM settings
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4-turbo-preview"

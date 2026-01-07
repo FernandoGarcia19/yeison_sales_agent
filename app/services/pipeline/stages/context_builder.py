@@ -34,7 +34,9 @@ class ContextBuilderStage(BasePipelineStage):
         
         self.log_info(
             "building_context",
-            conversation_id=context.conversation_id
+            conversation_id=context.conversation_id,
+            is_batch=context.is_batch,
+            batch_size=len(context.batch_messages) if context.batch_messages else 0
         )
         
         session_factory = get_session_factory()
@@ -73,6 +75,20 @@ class ContextBuilderStage(BasePipelineStage):
                 )
                 # Cache for 5 minutes (conversation data changes frequently)
                 await cache_set(cache_key, context.conversation_history, ttl=300)
+            
+            # For batched messages, combine all message bodies for better context
+            if context.is_batch and context.batch_messages:
+                # Combine messages with newlines for AI context
+                combined_messages = []
+                for msg in context.batch_messages:
+                    combined_messages.append(msg.get("body", ""))
+                context.message_body = "\n".join(combined_messages)
+                
+                self.log_info(
+                    "batched_messages_combined",
+                    original_count=len(context.batch_messages),
+                    combined_length=len(context.message_body)
+                )
             
             # Load relevant inventory based on intent (with tenant-scoped caching)
             if context.intent in ["product_inquiry", "pricing_question", "availability_check"]:

@@ -12,12 +12,28 @@ This is a WhatsApp AI Sales Agent that processes incoming WhatsApp messages thro
 ### High-Level Flow
 
 ```
-WhatsApp → Twilio → Webhook → Pipeline → WhatsApp Response
-                                  ↓
-                          Database (read)
-                          Redis (cache)
-                          Main Backend API (mutations)
+WhatsApp → Twilio → Webhook → Batch Queue (Redis) → Pipeline → WhatsApp Response
+                                  ↓                      ↓
+                              Wait 3s for              Database (read)
+                              more messages            Redis (cache)
+                                                       Main Backend API (mutations)
 ```
+
+### Message Batching
+
+The system implements intelligent message batching to handle rapid-fire messages from users:
+
+- **Wait Window**: When a message arrives, the system waits 3 seconds to collect additional messages
+- **Smart Processing**: Multiple messages from the same user are processed together as a single context
+- **Early Firing**: If 5+ messages arrive before the 3-second window, processing happens immediately
+- **Context Preservation**: All messages are saved individually in history, but AI generates one contextual response
+
+**Example**: User sends "Hola" followed by "Quiero comprar zapatos" within 1 second → AI sees both messages as context and generates one relevant response about shoe products.
+
+**Configuration**:
+- `BATCH_ENABLED=true` - Enable/disable message batching
+- `BATCH_WINDOW_SECONDS=3` - Wait time to collect messages
+- `BATCH_MAX_MESSAGES=5` - Max messages before firing early
 
 ### Pipeline Stages
 
@@ -41,7 +57,7 @@ yeison_sales_agent/
 │   ├── core/
 │   │   ├── config.py                # Configuration settings
 │   │   ├── database.py              # Database session management
-│   │   └── redis_client.py          # Redis caching layer
+│   │   └── redis_client.py          # Redis caching + batch queue
 │   ├── integrations/
 │   │   └── whatsapp/
 │   │       ├── client.py            # WhatsApp message sender
@@ -57,6 +73,7 @@ yeison_sales_agent/
 │   │   ├── message.py               # Message schemas
 │   │   └── pipeline.py              # Pipeline context schemas
 │   └── services/
+│       ├── batch_manager.py         # Message batching service
 │       └── pipeline/
 │           ├── base.py              # Base pipeline stage interface
 │           ├── runner.py            # Pipeline orchestrator
@@ -95,16 +112,25 @@ This service reads from an existing PostgreSQL database with the following table
 
 - Receives POST requests from Twilio
 - Validates Twilio signature for security
-- Queues messages for background processing
+- Enqueues messages to Redis batch queue (if batching enabled)
 - Returns 200 OK immediately (Twilio requires <15s response)
 
-### 2. Pipeline Runner (`app/services/pipeline/runner.py`)
+### 2. Batch Manager (`app/services/batch_manager.py`)
+
+- Manages message queuing and batching logic
+- Implements 3-second wait window with asyncio timers
+- Deduplicates messages using Twilio `message_sid`
+- Fires early if max batch size reached (5 messages)
+- Processes batches through pipeline with combined context
+
+### 3. Pipeline Runner (`app/services/pipeline/runner.py`)
 
 - Orchestrates all 6 pipeline stages
 - Handles errors and logging
 - Tracks processing time and metrics
+- Supports both single and batched message processing
 
-### 3. Pipeline Stages
+### 4. Pipeline Stages
 
 #### Validation Stage
 - Validates message format
@@ -127,6 +153,7 @@ This service reads from an existing PostgreSQL database with the following table
 - Queries relevant inventory items
 - Loads lead information if exists
 - Prepares data for AI response generation
+- **Batching**: Combines multiple message bodies with newlines for unified context
 
 #### Action Executor Stage
 - Routes to appropriate action based on intent
@@ -139,6 +166,8 @@ This service reads from an existing PostgreSQL database with the following table
 - **TODO**: Implement LLM-based response generation
 - Sends message via Twilio
 - Saves messages to conversation history
+- **Batching**: Saves all user messages individually, then one assistant response
+- Invalidates conversation cache after saving
 
 ### 4. Caching Layer (`app/core/redis_client.py`)
 
@@ -146,6 +175,11 @@ This service reads from an existing PostgreSQL database with the following table
 - Caches agent instance data
 - Cache keys: `tenant:{id}`, `agent:{id}`, `agent:phone:{number}`
 - Default TTL: 1 hour
+- **Message Batching**:
+  - Redis list operations for message queues
+  - Distributed locks for batch timer coordination
+  - Queue keys: `batch_queue:{agent_phone}:{user_phone}`
+  - Lock keys: `batch_lock:{agent_phone}:{user_phone}`
 
 ## Intent Types
 
@@ -174,6 +208,11 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 # Redis
 REDIS_URL=redis://localhost:6379/0
 
+# Message Batching
+BATCH_ENABLED=true
+BATCH_WINDOW_SECONDS=3
+BATCH_MAX_MESSAGES=5
+
 # Twilio
 TWILIO_ACCOUNT_SID=your_sid
 TWILIO_AUTH_TOKEN=your_token
@@ -195,41 +234,47 @@ BACKEND_API_KEY=your_api_key
 1. **Implement LLM Integration**
    - Add OpenAI client in classifier stage
    - Create prompt templates for intent classification
-   - Implement LLM-based response generation
+   - Implement LLM-based response generation (currently using templates)
 
 2. **Main Backend API Client**
    - Create HTTP client for main backend
    - Implement lead creation/update endpoints
    - Add analytics event tracking
 
-3. **Alembic Migrations**
+3. **Message Batching Enhancements**
+   - Add monitoring/metrics for batch processing
+   - Implement batch retry logic on failures
+   - Add batch size analytics and optimization
+
+4. **Alembic Migrations**
    - Set up Alembic for database migrations
    - Create initial migration from existing schema
 
 ### Medium Priority
 
-4. **Advanced Intent Classification**
+5. **Advanced Intent Classification**
    - Fine-tune prompts for better accuracy
    - Add confidence thresholds
    - Implement fallback strategies
 
-5. **Conversation State Machine**
+6. **Conversation State Machine**
    - Track conversation states (greeting → inquiry → qualification → closing)
    - Implement context-aware responses
 
-6. **Error Handling & Monitoring**
+7. **Error Handling & Monitoring**
    - Add Sentry for error tracking
    - Implement retry logic
    - Add Prometheus metrics
 
 ### Low Priority
 
-7. **Testing**
+8. **Testing**
    - Unit tests for pipeline stages
    - Integration tests for webhook
    - Mock Twilio responses
+   - Test message batching scenarios
 
-8. **Performance Optimization**
+9. **Performance Optimization**
    - Implement connection pooling
    - Add rate limiting
    - Optimize database queries

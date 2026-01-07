@@ -2,7 +2,7 @@
 Redis client for caching tenant configs, agent instances, and conversation state.
 """
 
-from typing import Optional, Any
+from typing import Optional, Any, List
 import json
 from redis.asyncio import Redis, ConnectionPool
 
@@ -149,3 +149,125 @@ def build_conversation_cache_key(tenant_id: int, conversation_id: int) -> str:
 def build_inventory_cache_key(tenant_id: int) -> str:
     """Build cache key for tenant inventory (tenant-scoped)."""
     return f"tenant:{tenant_id}:inventory"
+
+
+# Message batching operations
+
+async def list_push(key: str, value: Any) -> int:
+    """
+    Push value to the left of a Redis list (LPUSH).
+    
+    Args:
+        key: List key
+        value: Value to push (will be JSON serialized)
+    
+    Returns:
+        Length of the list after push
+    """
+    redis = get_redis_client()
+    serialized = json.dumps(value)
+    return await redis.lpush(key, serialized)
+
+
+async def list_pop(key: str) -> Optional[Any]:
+    """
+    Pop value from the right of a Redis list (RPOP).
+    
+    Args:
+        key: List key
+    
+    Returns:
+        Deserialized value or None if list is empty
+    """
+    redis = get_redis_client()
+    value = await redis.rpop(key)
+    if value is None:
+        return None
+    return json.loads(value)
+
+
+async def list_range(key: str, start: int = 0, end: int = -1) -> List[Any]:
+    """
+    Get range of values from a Redis list (LRANGE).
+    
+    Args:
+        key: List key
+        start: Start index (0-based)
+        end: End index (-1 for all)
+    
+    Returns:
+        List of deserialized values
+    """
+    redis = get_redis_client()
+    values = await redis.lrange(key, start, end)
+    return [json.loads(v) for v in values]
+
+
+async def list_length(key: str) -> int:
+    """
+    Get length of a Redis list (LLEN).
+    
+    Args:
+        key: List key
+    
+    Returns:
+        Length of the list
+    """
+    redis = get_redis_client()
+    return await redis.llen(key)
+
+
+async def list_delete(key: str) -> bool:
+    """
+    Delete a Redis list.
+    
+    Args:
+        key: List key
+    
+    Returns:
+        True if key was deleted
+    """
+    redis = get_redis_client()
+    result = await redis.delete(key)
+    return result > 0
+
+
+async def acquire_lock(key: str, ttl: int = 10) -> bool:
+    """
+    Acquire a distributed lock using Redis SETNX.
+    
+    Args:
+        key: Lock key
+        ttl: Time to live in seconds
+    
+    Returns:
+        True if lock was acquired, False if already locked
+    """
+    redis = get_redis_client()
+    result = await redis.set(key, "locked", nx=True, ex=ttl)
+    return result is not None
+
+
+async def release_lock(key: str) -> bool:
+    """
+    Release a distributed lock.
+    
+    Args:
+        key: Lock key
+    
+    Returns:
+        True if lock was released
+    """
+    redis = get_redis_client()
+    result = await redis.delete(key)
+    return result > 0
+
+
+def build_batch_queue_key(agent_phone: str, user_phone: str) -> str:
+    """Build cache key for message batch queue."""
+    return f"batch_queue:{agent_phone}:{user_phone}"
+
+
+def build_batch_lock_key(agent_phone: str, user_phone: str) -> str:
+    """Build cache key for batch processing lock."""
+    return f"batch_lock:{agent_phone}:{user_phone}"

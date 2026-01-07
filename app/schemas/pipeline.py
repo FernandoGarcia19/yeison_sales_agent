@@ -50,6 +50,13 @@ class PipelineContext(BaseModel):
     profile_name: Optional[str] = Field(None, description="WhatsApp profile name")
     media_urls: List[str] = Field(default_factory=list, description="Media URLs if any")
     
+    # Batch processing fields
+    is_batch: bool = Field(default=False, description="Whether this is a batched message set")
+    batch_messages: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="List of batched messages if is_batch=True"
+    )
+    
     # Identification stage results
     tenant_id: Optional[int] = Field(None, description="Identified tenant ID")
     agent_instance_id: Optional[int] = Field(None, description="Identified agent instance ID")

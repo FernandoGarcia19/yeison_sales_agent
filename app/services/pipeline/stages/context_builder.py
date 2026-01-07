@@ -41,10 +41,15 @@ class ContextBuilderStage(BasePipelineStage):
         async with session_factory() as db:
             # Load agent configuration (with tenant-scoped caching)
             agent_cache_key = build_agent_cache_key(context.tenant_id, context.agent_instance_id)
-            cached_agent_config = await cache_get(agent_cache_key)
+            cached_agent_data = await cache_get(agent_cache_key)
             
-            if cached_agent_config:
-                context.agent_config = cached_agent_config
+            if cached_agent_data:
+                # Handle both formats: dict with 'configuration' key (from identifier) 
+                # or direct configuration dict (from context_builder)
+                if isinstance(cached_agent_data, dict) and "configuration" in cached_agent_data:
+                    context.agent_config = cached_agent_data["configuration"]
+                else:
+                    context.agent_config = cached_agent_data
                 self.log_info("agent_config_from_cache", agent_instance_id=context.agent_instance_id)
             else:
                 context.agent_config = await self._load_agent_configuration(
@@ -254,7 +259,7 @@ class ContextBuilderStage(BasePipelineStage):
         self,
         db: AsyncSession,
         conversation_id: int,
-        limit: int = 4
+        limit: int = 10
     ) -> list[dict]:
         """Load recent conversation messages."""
         

@@ -157,6 +157,7 @@ class ResponseGeneratorStage(BasePipelineStage):
         emoji_usage = personality.get("emoji_usage", "moderate")
         response_length = personality.get("response_length", "concise")
         brand_voice = personality.get("brand_voice", "")
+        custom_phrases = personality.get("custom_phrases", {})
         
         sales_process = agent_config.get("sales_process", {})
         upsell_enabled = sales_process.get("upsell_enabled", True)
@@ -193,6 +194,7 @@ class ResponseGeneratorStage(BasePipelineStage):
         system_prompt = f"""Eres {agent_name}, un asistente virtual de ventas para {company_name}.
 
 INFORMACIÓN DE LA EMPRESA:
+- Nombre: {company_name}
 - Industria: {industry}
 - Descripción: {description if description else 'Empresa dedicada a ' + industry}
 """
@@ -201,12 +203,28 @@ INFORMACIÓN DE LA EMPRESA:
             system_prompt += f"""- Teléfono: {contact_info.get('phone', 'N/A')}
 - Email: {contact_info.get('email', 'N/A')}
 - Dirección: {contact_info.get('address', 'N/A')}
+- Sitio web: {contact_info.get('website', 'N/A')}
 """
         
         if brand_voice:
             system_prompt += f"""
 VOZ DE MARCA:
 {brand_voice}
+"""
+        
+        # Add custom phrases section
+        if custom_phrases:
+            system_prompt += """
+FRASES PERSONALIZADAS:
+"""
+            if custom_phrases.get('greeting'):
+                system_prompt += f"""- Saludo inicial: "{custom_phrases['greeting']}"
+"""
+            if custom_phrases.get('farewell'):
+                system_prompt += f"""- Despedida: "{custom_phrases['farewell']}"
+"""
+            if custom_phrases.get('thanks'):
+                system_prompt += f"""- Agradecimiento: "{custom_phrases['thanks']}"
 """
         
         system_prompt += f"""
@@ -222,19 +240,26 @@ CAPACIDADES:
 - Proporcionar información de precios {"y ofrecer descuentos hasta " + str(max_discount) + "%" if discount_authority else ""}
 - Verificar disponibilidad de productos
 - Ayudar con el proceso de compra
+- Proporcionar información sobre {company_name} (nombre, ubicación, contacto, etc.)
 {"- Sugerir productos complementarios o mejores opciones" if upsell_enabled else ""}
 
 INSTRUCCIONES IMPORTANTES:
-1. Sé {'natural y conversacional' if formality == 'casual' else 'profesional y cortés'}
-2. {"Incluye precios cuando sea relevante" if include_pricing else "Evita mencionar precios específicos sin autorización"}
-3. {"Menciona disponibilidad cuando se pregunte por productos" if show_availability else "Confirma disponibilidad antes de mencionar stock"}
-4. Mantén las respuestas {"breves y directas" if response_length == "brief" else "completas pero concisas" if response_length == "concise" else "detalladas y explicativas"}
-5. Si no tienes información suficiente, pregunta educadamente para clarificar
-6. Si el usuario necesita hablar con una persona, facilita el proceso amablemente
+1. Si te preguntan sobre la empresa, el negocio, o información de contacto, SIEMPRE usa la información proporcionada arriba
+2. Cuando te saluden por primera vez, usa tu frase de saludo personalizada si está configurada
+3. Sé {'natural y conversacional' if formality == 'casual' else 'profesional y cortés'}
+4. {"Incluye precios cuando sea relevante" if include_pricing else "Evita mencionar precios específicos sin autorización"}
+5. {"Menciona disponibilidad cuando se pregunte por productos" if show_availability else "Confirma disponibilidad antes de mencionar stock"}
+6. Mantén las respuestas {"breves y directas" if response_length == "brief" else "completas pero concisas" if response_length == "concise" else "detalladas y explicativas"}
+7. Si no tienes información suficiente sobre un producto específico, pregunta educadamente para clarificar
+8. Si el usuario necesita hablar con una persona, facilita el proceso amablemente
+9. NUNCA digas que no conoces el nombre de la empresa o que no tienes información - TODA la información está en este prompt
 
 IMPORTANTE: 
+- El nombre de tu empresa es {company_name}
+- Tu nombre es {agent_name}
 - NO inventes información que no te proporcionen
-- Si no hay productos disponibles o información específica, sé honesto
+- Si no hay productos disponibles o información específica sobre UN PRODUCTO, sé honesto
+- Pero SIEMPRE conoces la información básica de {company_name} que está arriba
 - Siempre busca ayudar al cliente de la mejor manera posible"""
 
         return system_prompt
@@ -252,7 +277,7 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
         # Add conversation history
         if context.conversation_history and len(context.conversation_history) > 0:
             prompt += "HISTORIAL DE CONVERSACIÓN:\n"
-            for msg in context.conversation_history[-5:]:  # Last 5 messages
+            for msg in context.conversation_history[-10:]:  # Last 10 messages
                 role = "Usuario" if msg.get("role") == "user" else "Tú"
                 content = msg.get("content", "")
                 prompt += f"{role}: {content}\n"

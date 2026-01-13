@@ -18,7 +18,7 @@ class IntentType(str, Enum):
     PURCHASE_INTENT = "purchase_intent"
     OBJECTION = "objection"
     COMPLAINT = "complaint"
-    SUPPORT_REQUEST = "support_request"
+    HANDOFF_REQUEST = "handoff_request"
     CLOSING = "closing"
     GENERAL_QUESTION = "general_question"
     UNKNOWN = "unknown"
@@ -49,6 +49,13 @@ class PipelineContext(BaseModel):
     message_body: str = Field(..., description="Message text content")
     profile_name: Optional[str] = Field(None, description="WhatsApp profile name")
     media_urls: List[str] = Field(default_factory=list, description="Media URLs if any")
+    
+    # Batch processing fields
+    is_batch: bool = Field(default=False, description="Whether this is a batched message set")
+    batch_messages: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="List of batched messages if is_batch=True"
+    )
     
     # Identification stage results
     tenant_id: Optional[int] = Field(None, description="Identified tenant ID")

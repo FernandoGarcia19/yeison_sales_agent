@@ -25,11 +25,21 @@ class Settings(BaseSettings):
     redis_url: Optional[str] = None
     redis_ttl: int = 3600  # 1 hour default TTL for cached data
     
+    # Message batching settings
+    batch_enabled: bool = True  # Enable/disable message batching
+    batch_window_seconds: int = 3  # Wait time to collect multiple messages
+    batch_max_messages: int = 5  # Maximum messages per batch (fire early if reached)
+    
     # AI/LLM settings
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4-turbo-preview"
     openai_temperature: float = 0.7
     openai_max_tokens: int = 500
+    
+    # OpenRouter settings (for testing, compatible with OpenAI SDK)
+    use_openrouter: bool = False  # Set to True to use OpenRouter instead of OpenAI
+    openrouter_api_key: Optional[str] = None
+    openrouter_model: str = "openai/gpt-3.5-turbo"  # Model to use with OpenRouter
     
     # Main Backend API settings (for mutations)
     backend_api_url: Optional[str] = None

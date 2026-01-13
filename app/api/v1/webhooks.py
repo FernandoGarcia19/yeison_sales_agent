@@ -10,7 +10,9 @@ from datetime import datetime
 from app.schemas.webhook import TwilioWebhookRequest, TwilioWebhookResponse
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.runner import PipelineRunner
+from app.services.batch_manager import enqueue_message
 from app.integrations.whatsapp.validator import validate_twilio_signature
+from app.core.config import settings
 
 logger = structlog.get_logger()
 
@@ -111,11 +113,39 @@ async def receive_twilio_webhook(
         # For production, uncomment the line below:
         # raise HTTPException(status_code=403, detail="Signature validation failed")
     
-    # Queue message for background processing
-    background_tasks.add_task(
-        process_message_pipeline,
-        webhook_data=webhook_data
-    )
+    # Queue message for batch processing or process immediately
+    if settings.batch_enabled:
+        # Enqueue to batch queue
+        try:
+            await enqueue_message(
+                agent_phone=webhook_data.recipient_phone,
+                user_phone=webhook_data.sender_phone,
+                message_sid=webhook_data.MessageSid,
+                body=webhook_data.Body,
+                profile_name=webhook_data.ProfileName,
+                media_urls=webhook_data.get_media_urls(),
+            )
+            logger.info(
+                "message_enqueued_for_batching",
+                message_sid=webhook_data.MessageSid,
+            )
+        except Exception as e:
+            logger.error(
+                "batch_enqueue_failed",
+                message_sid=webhook_data.MessageSid,
+                error=str(e),
+            )
+            # Fallback to immediate processing
+            background_tasks.add_task(
+                process_message_pipeline,
+                webhook_data=webhook_data
+            )
+    else:
+        # Process immediately without batching
+        background_tasks.add_task(
+            process_message_pipeline,
+            webhook_data=webhook_data
+        )
     
     # Return immediate response to Twilio (must respond within 15 seconds)
     return Response(

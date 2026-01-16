@@ -152,6 +152,27 @@ class ResponseGeneratorStage(BasePipelineStage):
         description = tenant_info.get("description", "")
         contact_info = tenant_info.get("contact_info", {})
         
+        # Log what we're using for the prompt
+        self.log_info(
+            "building_system_prompt",
+            agent_config_keys=list(agent_config.keys()),
+            tenant_info_keys=list(tenant_info.keys()),
+            company_name=company_name,
+            industry=industry,
+            has_description=bool(description),
+            has_contact=bool(contact_info),
+            has_product_info=bool(agent_config.get("product_info")),
+            has_operations_info=bool(agent_config.get("operations_info"))
+        )
+        
+        # CRITICAL: Log if we're using defaults
+        if company_name == "nuestra empresa":
+            self.log_error(
+                "using_default_company_name",
+                tenant_info=tenant_info,
+                full_agent_config_keys=list(agent_config.keys())
+            )
+        
         personality = agent_config.get("personality", {})
         tone = personality.get("tone", "friendly")
         formality = personality.get("formality_level", "casual")
@@ -159,11 +180,6 @@ class ResponseGeneratorStage(BasePipelineStage):
         response_length = personality.get("response_length", "concise")
         brand_voice = personality.get("brand_voice", "")
         custom_phrases = personality.get("custom_phrases", {})
-        
-        sales_process = agent_config.get("sales_process", {})
-        upsell_enabled = sales_process.get("upsell_enabled", True)
-        discount_authority = sales_process.get("discount_authority", False)
-        max_discount = sales_process.get("max_discount_percent", 0)
         
         response_settings = agent_config.get("response_settings", {})
         include_pricing = response_settings.get("include_pricing", True)
@@ -192,19 +208,72 @@ class ResponseGeneratorStage(BasePipelineStage):
             "formal": "formal y respetuoso"
         }.get(tone, "amigable")
         
+        # Get additional business context from new config structure
+        product_info = agent_config.get("product_info", {})
+        operations_info = agent_config.get("operations_info", {})
+        
         system_prompt = f"""Eres {agent_name}, un asistente virtual de ventas para {company_name}.
 
 INFORMACIÓN DE LA EMPRESA:
 - Nombre: {company_name}
 - Industria: {industry}
 - Descripción: {description if description else 'Empresa dedicada a ' + industry}
+- Ubicación: {tenant_info.get('location', 'N/A')}
+- Sitio web: {tenant_info.get('website', 'N/A')}
 """
         
-        if contact_info:
-            system_prompt += f"""- Teléfono: {contact_info.get('phone', 'N/A')}
-- Email: {contact_info.get('email', 'N/A')}
-- Dirección: {contact_info.get('address', 'N/A')}
-- Sitio web: {contact_info.get('website', 'N/A')}
+        if contact_info and any(contact_info.values()):
+            system_prompt += f"""
+INFORMACIÓN DE CONTACTO:"""
+            if contact_info.get('name'):
+                system_prompt += f"\n- Contacto: {contact_info.get('name')}"
+                if contact_info.get('role'):
+                    system_prompt += f" ({contact_info.get('role')})"
+            if contact_info.get('phone'):
+                system_prompt += f"\n- Teléfono: {contact_info.get('phone')}"
+            if contact_info.get('email'):
+                system_prompt += f"\n- Email: {contact_info.get('email')}"
+            system_prompt += "\n"
+        
+        # Add product information if available
+        if product_info:
+            if product_info.get('unique_selling_points'):
+                system_prompt += f"""
+PROPUESTAS DE VALOR:
+{product_info['unique_selling_points']}
+"""
+            if product_info.get('target_audience'):
+                system_prompt += f"""
+AUDIENCIA OBJETIVO:
+{product_info['target_audience']}
+"""
+            if product_info.get('payment_methods'):
+                system_prompt += f"""
+MÉTODOS DE PAGO:
+{product_info['payment_methods']}
+"""
+        
+        # Add operations information if available
+        if operations_info:
+            if operations_info.get('sales_process'):
+                system_prompt += f"""
+PROCESO DE VENTAS:
+{operations_info['sales_process']}
+"""
+            if operations_info.get('common_questions'):
+                system_prompt += f"""
+PREGUNTAS FRECUENTES:
+{operations_info['common_questions']}
+"""
+            if operations_info.get('objections'):
+                system_prompt += f"""
+MANEJO DE OBJECIONES:
+{operations_info['objections']}
+"""
+            if operations_info.get('closing_techniques'):
+                system_prompt += f"""
+TÉCNICAS DE CIERRE:
+{operations_info['closing_techniques']}
 """
         
         if brand_voice:
@@ -238,11 +307,10 @@ PERSONALIDAD Y ESTILO:
 
 CAPACIDADES:
 - Responder preguntas sobre productos y servicios
-- Proporcionar información de precios {"y ofrecer descuentos hasta " + str(max_discount) + "%" if discount_authority else ""}
+- Proporcionar información de precios
 - Verificar disponibilidad de productos
 - Ayudar con el proceso de compra
 - Proporcionar información sobre {company_name} (nombre, ubicación, contacto, etc.)
-{"- Sugerir productos complementarios o mejores opciones" if upsell_enabled else ""}
 
 INSTRUCCIONES IMPORTANTES:
 1. Si te preguntan sobre la empresa, el negocio, o información de contacto, SIEMPRE usa la información proporcionada arriba

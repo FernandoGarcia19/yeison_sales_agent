@@ -2,12 +2,13 @@
 Context builder stage - builds conversation context with history and data.
 """
 
+from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.base import BasePipelineStage
-from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance
+from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant
 from app.core.database import get_session_factory
 from app.core.redis_client import (
     cache_get,
@@ -45,15 +46,33 @@ class ContextBuilderStage(BasePipelineStage):
             agent_cache_key = build_agent_cache_key(context.tenant_id, context.agent_instance_id)
             cached_agent_data = await cache_get(agent_cache_key)
             
-            if cached_agent_data:
+            # TEMPORARY: Force reload from DB to debug
+            force_reload = True  # Set to False after debugging
+            
+            if cached_agent_data and not force_reload:
                 # Handle both formats: dict with 'configuration' key (from identifier) 
                 # or direct configuration dict (from context_builder)
                 if isinstance(cached_agent_data, dict) and "configuration" in cached_agent_data:
                     context.agent_config = cached_agent_data["configuration"]
                 else:
                     context.agent_config = cached_agent_data
-                self.log_info("agent_config_from_cache", agent_instance_id=context.agent_instance_id)
+                
+                # Log cached values to verify
+                cached_company = context.agent_config.get("tenant_info", {}).get("company_name", "NOT_SET")
+                self.log_info(
+                    "agent_config_from_cache",
+                    agent_instance_id=context.agent_instance_id,
+                    cached_company_name=cached_company,
+                    warning="Using cached data - may be outdated if config changed recently"
+                )
             else:
+                if force_reload and cached_agent_data:
+                    self.log_info(
+                        "force_reload_from_db",
+                        agent_instance_id=context.agent_instance_id,
+                        reason="Debugging configuration - bypassing cache"
+                    )
+                
                 context.agent_config = await self._load_agent_configuration(
                     db,
                     context.agent_instance_id
@@ -134,8 +153,11 @@ class ContextBuilderStage(BasePipelineStage):
         """
         Load agent configuration from database.
         
-        Returns a normalized configuration with defaults for missing values.
+        Loads both agent-specific configuration from agent_instance
+        and business-level configuration from configuration_tenant,
+        then merges them into a unified structure.
         """
+        # Load agent instance
         stmt = select(AgentInstance).where(
             AgentInstance.id == agent_instance_id
         )
@@ -143,15 +165,153 @@ class ContextBuilderStage(BasePipelineStage):
         result = await db.execute(stmt)
         agent = result.scalar_one_or_none()
         
-        if not agent or not agent.configuration:
-            # Return minimal default config
-            return self._get_default_agent_config()
+        if not agent:
+            return self._get_default_config()
         
-        # Merge with defaults to ensure all required fields exist
-        config = self._get_default_agent_config()
-        self._deep_merge(config, agent.configuration)
+        # Load tenant configuration
+        self.log_info(
+            "querying_tenant_config",
+            tenant_id=agent.tenant_id,
+            agent_id=agent_instance_id
+        )
+        
+        tenant_config_stmt = select(ConfigurationTenant).where(
+            ConfigurationTenant.tenant_id == agent.tenant_id,
+            ConfigurationTenant.active == True
+        )
+        
+        tenant_config_result = await db.execute(tenant_config_stmt)
+        tenant_config = tenant_config_result.scalar_one_or_none()
+        
+        # Log tenant configuration status
+        if tenant_config:
+            self.log_info(
+                "tenant_config_loaded",
+                tenant_id=agent.tenant_id,
+                has_business=tenant_config.business is not None,
+                has_contact=tenant_config.contact is not None,
+                has_products=tenant_config.products is not None,
+                has_operations=tenant_config.operations is not None
+            )
+        else:
+            self.log_info(
+                "tenant_config_not_found",
+                tenant_id=agent.tenant_id,
+                message="No active tenant configuration found - using defaults"
+            )
+        
+        # Build unified configuration
+        config = self._merge_configurations(
+            agent_config=agent.configuration if agent.configuration else {},
+            tenant_config=tenant_config
+        )
         
         return config
+    
+    def _merge_configurations(
+        self,
+        agent_config: dict,
+        tenant_config: Optional[ConfigurationTenant]
+    ) -> dict:
+        """
+        Merge agent-specific and tenant-level configurations.
+        
+        Creates a unified configuration structure that includes both
+        agent personality/settings and business information.
+        """
+        # Start with default structure
+        config = self._get_default_config()
+        
+        # Merge agent-specific configuration
+        self._deep_merge(config, agent_config)
+        
+        # Merge tenant business configuration if available
+        if tenant_config:
+            # Map tenant business config to tenant_info structure
+            if tenant_config.business:
+                tenant_info = config.setdefault("tenant_info", {})
+                
+                # Directly set values from tenant config (override defaults)
+                if "company_name" in tenant_config.business:
+                    tenant_info["company_name"] = tenant_config.business["company_name"]
+                if "industry" in tenant_config.business:
+                    tenant_info["industry"] = tenant_config.business["industry"]
+                if "description" in tenant_config.business:
+                    tenant_info["description"] = tenant_config.business["description"]
+                if "company_size" in tenant_config.business:
+                    tenant_info["company_size"] = tenant_config.business["company_size"]
+                if "location" in tenant_config.business:
+                    tenant_info["location"] = tenant_config.business["location"]
+                if "website" in tenant_config.business:
+                    tenant_info["website"] = tenant_config.business["website"]
+                if "year_founded" in tenant_config.business:
+                    tenant_info["year_founded"] = tenant_config.business["year_founded"]
+                
+                self.log_info(
+                    "merging_business_config",
+                    company_name=tenant_info.get("company_name"),
+                    industry=tenant_info.get("industry"),
+                    description=tenant_info.get("description", "")[:50] if tenant_info.get("description") else None
+                )
+            
+            # Map contact information
+            if tenant_config.contact:
+                contact_info = config.setdefault("tenant_info", {}).setdefault("contact_info", {})
+                if "contact_name" in tenant_config.contact:
+                    contact_info["name"] = tenant_config.contact["contact_name"]
+                if "contact_role" in tenant_config.contact:
+                    contact_info["role"] = tenant_config.contact["contact_role"]
+                if "contact_email" in tenant_config.contact:
+                    contact_info["email"] = tenant_config.contact["contact_email"]
+                if "contact_phone" in tenant_config.contact:
+                    contact_info["phone"] = tenant_config.contact["contact_phone"]
+            
+            # Map products configuration
+            if tenant_config.products:
+                config["product_info"] = {
+                    "unique_selling_points": tenant_config.products.get("unique_selling_points"),
+                    "target_audience": tenant_config.products.get("target_audience"),
+                    "payment_methods": tenant_config.products.get("payment_methods")
+                }
+            
+            # Map operations configuration
+            if tenant_config.operations:
+                ops = tenant_config.operations
+                config["operations_info"] = {
+                    "sales_process": ops.get("sales_process"),
+                    "common_questions": ops.get("common_questions"),
+                    "objections": ops.get("objections"),
+                    "closing_techniques": ops.get("closing_techniques"),
+                    "response_time": ops.get("response_time"),
+                    "languages": ops.get("languages"),
+                    "competitors": ops.get("competitors"),
+                    "additional_context": ops.get("additional_context")
+                }
+                
+                # Map business hours if present in operations
+                if ops.get("business_hours"):
+                    config["business_hours"] = ops["business_hours"]
+        
+        # Log final merged configuration
+        final_company = config.get("tenant_info", {}).get("company_name")
+        final_industry = config.get("tenant_info", {}).get("industry")
+        self.log_info(
+            "config_merge_complete",
+            final_company_name=final_company,
+            final_industry=final_industry,
+            has_product_info=bool(config.get("product_info")),
+            has_operations_info=bool(config.get("operations_info"))
+        )
+        
+        return config
+    
+    def _get_default_config(self) -> dict:
+        """
+        Get default configuration structure (renamed from _get_default_agent_config).
+        
+        This ensures all expected fields exist even if not in DB.
+        """
+        return self._get_default_agent_config()
     
     def _get_default_agent_config(self) -> dict:
         """
@@ -189,46 +349,9 @@ class ContextBuilderStage(BasePipelineStage):
                 "custom_phrases": {},
                 "brand_voice": ""
             },
-            "sales_process": {
-                "qualification_questions": [],
-                "product_presentation_style": "benefits_focused",
-                "pricing_strategy": "transparent",
-                "upsell_enabled": True,
-                "cross_sell_enabled": True,
-                "discount_authority": False,
-                "max_discount_percent": 0
-            },
-            "lead_management": {
-                "auto_create_leads": True,
-                "auto_follow_up": True,
-                "follow_up_schedule": [1, 3, 7],  # Days after last interaction
-                "follow_up_messages": [
-                    {
-                        "day": 1,
-                        "message": "Hola {name}, ¿ya decidiste sobre los productos que te mostré ayer? ¿Tienes alguna pregunta?"
-                    },
-                    {
-                        "day": 3,
-                        "message": "Hola {name}, solo quería recordarte que tenemos esos productos disponibles. ¿Te interesa hacer el pedido?"
-                    },
-                    {
-                        "day": 7,
-                        "message": "Hola {name}, esta semana tenemos una promoción especial. ¿Te gustaría saber más?"
-                    }
-                ],
-                "qualification_score_threshold": 75,
-                "hot_lead_actions": [
-                    "notify_sales_team",
-                    "priority_response"
-                ],
-                "lead_scoring_rules": {
-                    "product_inquiry": 10,
-                    "pricing_question": 15,
-                    "availability_check": 20,
-                    "purchase_intent": 40,
-                    "objection_handled": 5
-                }
-            },
+            "sales_process": {},
+            "lead_management": {},
+            "product_catalog": {},
             "response_settings": {
                 "max_response_length": 500,
                 "include_product_images": True,

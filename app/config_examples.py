@@ -24,7 +24,7 @@ EXAMPLE_AGENT_CONFIG = {
     
     # Integration settings
     "integrations": {
-        "whatsapp_number": "591766990995"
+        "supervisor_number": "591766990995"  # WhatsApp number for human handoff
     },
     
     # Personality and communication style
@@ -43,8 +43,13 @@ EXAMPLE_AGENT_CONFIG = {
         }
     },
     
-    # Sales process configuration (managed elsewhere - kept empty)
-    "sales_process": {},
+    # Sales process configuration (payment-related settings)
+    "sales_process": {
+        "QR_payment": True,           # Accept QR code payments
+        "physical_payment": True,     # Accept physical/cash payments
+        "physic_payment": True,       # Legacy field
+        "QR_image": ""                # URL/path to QR payment image
+    },
     
     # Lead management (managed elsewhere - kept empty)
     "lead_management": {},
@@ -151,9 +156,12 @@ MINIMAL_AGENT_CONFIG = {
         "language": "es"
     },
     "integrations": {
-        "whatsapp_number": "591766990995"
+        "supervisor_number": "591766990995"
     },
-    "sales_process": {},
+    "sales_process": {
+        "QR_payment": False,
+        "physical_payment": True
+    },
     "lead_management": {},
     "product_catalog": {}
 }

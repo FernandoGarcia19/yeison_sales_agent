@@ -175,7 +175,7 @@ class ResponseGeneratorStage(BasePipelineStage):
         
         personality = agent_config.get("personality", {})
         tone = personality.get("tone", "friendly")
-        formality = personality.get("formality_level", "casual")
+        formality = personality.get("formality_level")
         emoji_usage = personality.get("emoji_usage", "moderate")
         response_length = personality.get("response_length", "concise")
         brand_voice = personality.get("brand_voice", "")

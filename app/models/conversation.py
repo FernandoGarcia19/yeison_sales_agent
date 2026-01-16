@@ -2,7 +2,7 @@
 SalesConversation model - represents an ongoing conversation with a customer.
 """
 
-from typing import TYPE_CHECKING, List, Dict, Any
+from typing import TYPE_CHECKING, List, Dict, Any, Optional
 from sqlalchemy import String, BigInteger, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -10,6 +10,7 @@ from app.models.base import Base, TimestampMixin, ActiveMixin
 
 if TYPE_CHECKING:
     from app.models.agent_instance import AgentInstance
+    from app.models.lead import Lead
 
 
 class SalesConversation(Base, TimestampMixin, ActiveMixin):
@@ -32,10 +33,17 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
         nullable=False,
         index=True
     )
-    external_user_id: Mapped[int] = mapped_column(
-        String(15),
+    external_user_id: Mapped[str] = mapped_column(
+        String(20),
         nullable=False,
-        comment="WhatsApp user identifier or lead_id"
+        index=True,
+        comment="WhatsApp phone number in E.164 format (e.g., +584129876543)"
+    )
+    lead_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("lead.id"),
+        nullable=True,
+        index=True
     )
     messages: Mapped[List[Dict[str, Any]]] = mapped_column(
         JSON,
@@ -47,6 +55,11 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
     agent_instance: Mapped["AgentInstance"] = relationship(
         "AgentInstance",
         back_populates="conversations"
+    )
+    lead: Mapped[Optional["Lead"]] = relationship(
+        "Lead",
+        back_populates="conversations",
+        foreign_keys=[lead_id]
     )
     
     def __repr__(self) -> str:

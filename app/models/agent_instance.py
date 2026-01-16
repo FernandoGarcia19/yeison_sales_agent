@@ -36,9 +36,10 @@ class AgentInstance(Base, TimestampMixin, ActiveMixin):
         index=True
     )
     phone_number: Mapped[str] = mapped_column(
-        String(15),
+        String(20),
         nullable=False,
-        index=True
+        index=True,
+        comment="WhatsApp number in E.164 format (e.g., +584121234567)"
     )
     agent_type: Mapped[str] = mapped_column(String(50), nullable=False)
     configuration: Mapped[dict] = mapped_column(JSON, nullable=False)

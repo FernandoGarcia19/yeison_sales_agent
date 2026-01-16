@@ -52,11 +52,12 @@ class ResponseGeneratorStage(BasePipelineStage):
         response_text = await self._generate_response(context)
         context.response_text = response_text
         
-        # Send response via WhatsApp
+        # Send response via WhatsApp using the agent's phone number (multitenant)
         try:
             message_sid = await send_whatsapp_message(
                 to=context.sender_phone,
-                body=response_text
+                body=response_text,
+                from_number=context.recipient_phone  # Use agent's phone number for response
             )
             
             # Store message_sid in action_result

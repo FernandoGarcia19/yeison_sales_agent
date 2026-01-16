@@ -1,23 +1,40 @@
 # yeison_sales_agent
-# WhatsApp AI Sales Agent - Architecture Documentation
+# WhatsApp AI Sales Agent - Multitenant Architecture
 
 ## Project Overview
 
-This is a WhatsApp AI Sales Agent that processes incoming WhatsApp messages through Twilio webhooks and executes a multi-step workflow to handle sales conversations.
+This is a **multitenant WhatsApp AI Sales Agent** that processes incoming WhatsApp messages through Twilio webhooks and executes a multi-step workflow to handle sales conversations for multiple businesses simultaneously.
 
 **Key Principle**: This service focuses on **workflow execution only**. All CRUD operations for Tenant, Agent, Inventory, and Lead are handled by a separate main backend system.
+
+**Multitenant**: Each business (tenant) has its own WhatsApp number, configuration, inventory, and conversations. Data is completely isolated between tenants.
 
 ## Architecture
 
 ### High-Level Flow
 
 ```
-WhatsApp → Twilio → Webhook → Batch Queue (Redis) → Pipeline → WhatsApp Response
-                                  ↓                      ↓
-                              Wait 3s for              Database (read)
-                              more messages            Redis (cache)
-                                                       Main Backend API (mutations)
+WhatsApp → Twilio → Webhook → Tenant Identification → Batch Queue (Redis) → Pipeline → WhatsApp Response
+                         ↓              ↓                      ↓                  ↓
+                    Agent Phone    Tenant Context        Wait 3s for        Database (read)
+                    Lookup         Configuration         more messages      Redis (cache)
+                                                                             Main Backend API (mutations)
 ```
+
+### Multitenant Flow
+
+When a message arrives:
+
+1. **Phone Number Received**: Twilio webhook receives `From` (customer) and `To` (business WhatsApp number)
+2. **Tenant Identification**: System looks up which tenant owns the `To` number via `agent_instance` table
+3. **Context Loading**: Load tenant-specific configuration, inventory, and conversation history
+4. **Processing**: Pipeline processes with tenant context
+5. **Response**: Send response from the correct business WhatsApp number
+
+**Example**:
+- Customer sends to `+591766990995` (Zapatería El Paso) → System uses Tenant ID 1's inventory and config
+- Customer sends to `+591777123456` (Tech Store) → System uses Tenant ID 2's inventory and config
+- Conversations are completely isolated between tenants
 
 ### Message Batching
 
@@ -94,17 +111,50 @@ yeison_sales_agent/
 
 This service reads from an existing PostgreSQL database with the following tables:
 
-- **tenant** - Customer/organization information
-- **agent_instance** - AI agent configurations (phone_number, configuration JSON)
+### Core Tables
+
+- **tenant** - Business/organization information
+  - `id`, `name`, `email`, `profile_image`, `active`
+  
+- **agent_instance** - AI agent configurations per tenant
+  - `id`, `tenant_id`, `phone_number` (WhatsApp number), `agent_type`, `configuration` (JSONB)
+  - Unique constraint on `(phone_number, active)` ensures one number = one active agent
+  
+- **sales_conversation** - Conversation state and message history
+  - `id`, `agent_instance_id`, `external_user_id` (customer phone), `lead_id`, `messages` (JSONB)
+  - Unique constraint on `(agent_instance_id, external_user_id, active)` prevents duplicate conversations
+  
+- **lead** - Sales leads/prospects per tenant
+  - `id`, `agent_instance_id`, `tenant_id`, `name`, `email`, `phone`, `status`, `metadata` (JSONB)
+  
 - **inventory_tenant** - Product catalog per tenant
-- **lead** - Sales leads/prospects
-- **sales_conversation** - Conversation state and message history (JSONB)
+  - `id`, `tenant_id`, `product_name`, `price`, `quantity`, `description`
+
+### Data Isolation
+
+All queries **MUST** filter by `tenant_id` to ensure proper multitenant isolation:
+
+```python
+# ✅ CORRECT - Tenant-scoped query
+products = await db.execute(
+    select(InventoryTenant).where(
+        InventoryTenant.tenant_id == context.tenant_id,
+        InventoryTenant.active == True
+    )
+)
+
+# ❌ WRONG - Missing tenant_id filter
+products = await db.execute(
+    select(InventoryTenant).where(InventoryTenant.active == True)
+)
+```
 
 ### Data Access Pattern
 
-- **READ**: Direct database queries for tenant, agent, inventory, lead data
+- **READ**: Direct database queries for tenant, agent, inventory, lead data (always filtered by `tenant_id`)
 - **WRITE**: Only to `sales_conversation` table for conversation state
 - **MUTATIONS**: Via REST API calls to main backend (creating/updating leads, analytics)
+- **CACHING**: Redis cache with tenant-scoped keys (`tenant:{tenant_id}:{resource}`)
 
 ## Key Components
 

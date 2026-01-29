@@ -372,6 +372,41 @@ ngrok http 8000
 - `GET /api/v1/webhooks/twilio` - Webhook verification
 - `POST /api/v1/webhooks/twilio` - Receive WhatsApp messages
 
+## 📱 Notificaciones al Supervisor
+
+El sistema incluye notificaciones automáticas al supervisor/encargado cuando ocurren eventos importantes. Ver [NOTIFICACIONES.md](NOTIFICACIONES.md) para documentación completa.
+
+### Eventos que Generan Notificaciones
+
+1. **Venta Completada** 🎉
+   - Se envía cuando el cliente confirma una compra
+   - Incluye detalles del cliente, productos y total
+   - El lead se marca automáticamente como "converted"
+
+2. **Solicitud de Atención Humana** 🚨
+   - Se envía cuando el cliente pide hablar con un humano
+   - Incluye contexto de la conversación
+   - Notificación inmediata para respuesta rápida
+
+### Configuración Rápida
+
+```bash
+# Ver agentes disponibles
+python update_supervisor_config.py --list
+
+# Configurar número de supervisor
+python update_supervisor_config.py --agent-id 3 --supervisor-number +59177123456
+
+# Verificar configuración
+python update_supervisor_config.py --agent-id 3 --show
+```
+
+### Formato del Número
+
+- Debe estar en formato E.164: `+[código país][número]`
+- Ejemplo Bolivia: `+59177123456`
+- Ejemplo Venezuela: `+584121234567`
+
 ## Security
 
 - Twilio signature validation on all webhook requests

@@ -69,8 +69,17 @@ class PipelineRunner:
             # Execute each stage sequentially
             for stage in self.stages:
                 # Update current stage in context
-                stage_name = stage.__class__.__name__.replace("Stage", "").lower()
-                context.current_stage = PipelineStageEnum(stage_name) if stage_name in [s.value for s in PipelineStageEnum] else None
+                # Map class names to stage enum values
+                stage_class_name = stage.__class__.__name__
+                stage_mapping = {
+                    "ValidationStage": PipelineStageEnum.VALIDATION,
+                    "IdentificationStage": PipelineStageEnum.IDENTIFICATION,
+                    "ClassificationStage": PipelineStageEnum.CLASSIFICATION,
+                    "ContextBuilderStage": PipelineStageEnum.CONTEXT_BUILDING,
+                    "ActionExecutorStage": PipelineStageEnum.ACTION_EXECUTION,
+                    "ResponseGeneratorStage": PipelineStageEnum.RESPONSE_GENERATION,
+                }
+                context.current_stage = stage_mapping.get(stage_class_name)
                 
                 # Execute the stage
                 context = await stage.execute(context)

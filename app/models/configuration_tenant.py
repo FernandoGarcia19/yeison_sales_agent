@@ -87,6 +87,17 @@ class ConfigurationTenant(Base, TimestampMixin):
         """Check if minimum contact information is provided."""
         if not self.contact:
             return False
-        # At least one contact method should be provided
-        contact_methods = ["contact_email", "contact_phone"]
-        return any(self.contact.get(field) for field in contact_methods)
+        # Phone is required for WhatsApp-only communication
+        return bool(self.contact.get("contact_phone"))
+    
+    def is_qr_payment_enabled(self) -> bool:
+        """Check if QR payment is enabled for this tenant."""
+        if not self.products:
+            return False
+        return bool(self.products.get("qr_payment_enabled", False))
+    
+    def get_qr_payment_url(self) -> str:
+        """Get QR payment URL if available."""
+        if not self.products:
+            return ""
+        return self.products.get("qr_payment_url", "")

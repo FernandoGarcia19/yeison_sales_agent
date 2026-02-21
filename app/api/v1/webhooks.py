@@ -40,7 +40,7 @@ async def receive_twilio_webhook(
     AccountSid: str = Form(...),
     From: str = Form(...),
     To: str = Form(...),
-    Body: str = Form(...),
+    Body: str = Form(default=""),
     NumMedia: str = Form(default="0"),
     ProfileName: str = Form(default=None),
     WaId: str = Form(default=None),
@@ -49,6 +49,14 @@ async def receive_twilio_webhook(
     Longitude: str = Form(default=None),
     MediaUrl0: str = Form(default=None),
     MediaContentType0: str = Form(default=None),
+    MediaUrl1: str = Form(default=None),
+    MediaContentType1: str = Form(default=None),
+    MediaUrl2: str = Form(default=None),
+    MediaContentType2: str = Form(default=None),
+    MediaUrl3: str = Form(default=None),
+    MediaContentType3: str = Form(default=None),
+    MediaUrl4: str = Form(default=None),
+    MediaContentType4: str = Form(default=None),
 ):
     """
     Receive WhatsApp messages from Twilio webhook.

@@ -102,7 +102,6 @@ EXAMPLE_TENANT_CONFIG = {
     "contact": {
         "contact_name": "María Gonzales",
         "contact_role": "Gerente de Ventas",
-        "contact_email": "ventas@elpaso.com",
         "contact_phone": "591-77123456"
     },
     
@@ -110,7 +109,9 @@ EXAMPLE_TENANT_CONFIG = {
     "products": {
         "unique_selling_points": "Calidad premium, diseños exclusivos, garantía de satisfacción, atención personalizada",
         "target_audience": "Profesionales de 25-45 años que buscan calzado de calidad para uso diario y ocasiones especiales",
-        "payment_methods": "Efectivo, transferencia bancaria, tarjetas de crédito/débito, QR (pago móvil)"
+        "payment_methods": "Efectivo, transferencia bancaria, tarjetas de crédito/débito, QR (pago móvil)",
+        "qr_payment_enabled": True,
+        "qr_payment_url": "https://example.com/qr_code.png"
     },
     
     # Operations JSONB field
@@ -173,7 +174,7 @@ MINIMAL_TENANT_CONFIG = {
         "description": "Venta de productos diversos"
     },
     "contact": {
-        "contact_email": "contacto@mitienda.com"
+        "contact_phone": "591-77123456"
     }
 }
 

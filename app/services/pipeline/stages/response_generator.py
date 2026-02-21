@@ -231,8 +231,6 @@ INFORMACIÓN DE CONTACTO:"""
                     system_prompt += f" ({contact_info.get('role')})"
             if contact_info.get('phone'):
                 system_prompt += f"\n- Teléfono: {contact_info.get('phone')}"
-            if contact_info.get('email'):
-                system_prompt += f"\n- Email: {contact_info.get('email')}"
             system_prompt += "\n"
         
         # Add product information if available
@@ -388,6 +386,10 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         Generate fallback template-based response when AI fails.
         """
         
+        # Handle payment proof received specially
+        if context.action_type == "payment_proof_received":
+            return self._payment_proof_response(context)
+        
         # Simple template-based responses (placeholder)
         if context.intent == IntentType.GREETING:
             return self._greeting_response(context)
@@ -465,7 +467,37 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
     
     def _purchase_intent_response(self, context: PipelineContext) -> str:
         """Generate purchase intent response."""
+        
+        # Check if QR payment was initiated
+        if context.action_result:
+            action = context.action_result.get("action", "")
+            
+            if action == "awaiting_payment_proof":
+                # QR was sent, ask customer to scan
+                return "✅ Te acabo de enviar el código QR. Por favor escanéalo con tu billetera digital para completar el pago."
+            elif action == "sale_completed":
+                # Non-QR payment, sale is complete
+                return "¡Excelente! Tu compra ha sido confirmada. Nuestro equipo se pondrá en contacto contigo pronto."
+            elif action == "qr_payment_failed":
+                # QR failed, provide alternative
+                return "Disculpa, tuvimos un problema al enviar el QR. Por favor intenta de nuevo o contacta con nuestro equipo."
+            elif action == "qualify_lead":
+                # Not ready yet
+                return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Cuál plan te interesa? (Plan Estándar $100/mes o Plan Premium $200/mes)"
+        
+        # Default response
         return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Qué producto te gustaría adquirir?"
+    
+    def _payment_proof_response(self, context: PipelineContext) -> str:
+        """Generate response when payment proof is received."""
+        
+        if context.action_result:
+            if context.action_result.get("supervisor_notified"):
+                return "✅ ¡Perfecto! Recibimos tu comprobante de pago. Nuestro equipo está revisando tu solicitud y se pondrá en contacto contigo pronto. ¡Gracias por tu compra! 🎉"
+            else:
+                return "⚠️ Recibimos tu comprobante, pero hubo un problema al notificar a nuestro equipo. Por favor contacta con nosotros directamente."
+        
+        return "✅ ¡Gracias! Recibimos tu comprobante. Estamos procesando tu solicitud."
     
     async def _save_messages_to_conversation(self, context: PipelineContext):
         """Save incoming and outgoing messages to conversation history."""

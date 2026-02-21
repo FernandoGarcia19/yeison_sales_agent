@@ -53,8 +53,55 @@ class ClassificationStage(BasePipelineStage):
         self.log_info(
             "classifying_intent",
             message_sid=context.message_sid,
-            message_preview=context.message_body[:50]
+            message_preview=context.message_body[:50] if context.message_body else "",
+            has_media=len(context.media_urls) > 0
         )
+        
+        # PRIORITY 1: Check if this is a payment proof submission BEFORE sending to LLM
+        # If media is present without significant text content, likely a payment proof
+        if context.media_urls and len(context.media_urls) > 0:
+            # Check message body - if mostly empty, it's likely a media-only message
+            message_body_trimmed = context.message_body.strip() if context.message_body else ""
+            
+            # Case 1: Media + recent QR mention in history
+            if len(context.conversation_history) >= 2:
+                recent_messages = context.conversation_history[-5:]  # Check last 5 messages
+                for msg in recent_messages:
+                    msg_content = msg.get("content", "").lower()
+                    # Check for QR/payment keywords in recent messages
+                    if ("qr" in msg_content or "código qr" in msg_content or "escanea" in msg_content or 
+                        "comprobante" in msg_content or "pago" in msg_content or "pagando" in msg_content):
+                        # This is likely a payment proof response
+                        context.intent = IntentType.PURCHASE_INTENT
+                        context.intent_confidence = 0.98
+                        context.action_type = "payment_proof_received"
+                        
+                        self.log_info(
+                            "payment_proof_detected_early",
+                            message_sid=context.message_sid,
+                            media_count=len(context.media_urls),
+                            media_urls=context.media_urls,
+                            reason="Media + payment keywords in history"
+                        )
+                        return context
+            
+            # Case 2: Media without text body (likely just a screenshot/image)
+            # This handles cases where customer sends media as reply without text
+            if not message_body_trimmed or len(message_body_trimmed) < 5:
+                # Media without meaningful text - assume it's payment proof
+                context.intent = IntentType.PURCHASE_INTENT
+                context.intent_confidence = 0.85
+                context.action_type = "payment_proof_received"
+                
+                self.log_info(
+                    "payment_proof_detected_media_only",
+                    message_sid=context.message_sid,
+                    media_count=len(context.media_urls),
+                    media_urls=context.media_urls,
+                    body_length=len(message_body_trimmed),
+                    reason="Media-only message (no meaningful text)"
+                )
+                return context
         
         try:
             intent, confidence = await self._classify_intent_ai(

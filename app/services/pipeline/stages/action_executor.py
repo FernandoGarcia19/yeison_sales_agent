@@ -31,11 +31,16 @@ class ActionExecutorStage(BasePipelineStage):
         
         self.log_info(
             "executing_action",
-            intent=context.intent.value if context.intent else None
+            intent=context.intent.value if context.intent else None,
+            action_type=context.action_type
         )
         
+        # Check if this is a payment proof submission (special case)
+        if context.action_type == "payment_proof_received":
+            await self._handle_payment_proof_received(context)
+        
         # Route to appropriate action based on intent
-        if context.intent == IntentType.PRODUCT_INQUIRY:
+        elif context.intent == IntentType.PRODUCT_INQUIRY:
             await self._handle_product_inquiry(context)
         
         elif context.intent == IntentType.PRICING_QUESTION:
@@ -90,36 +95,220 @@ class ActionExecutorStage(BasePipelineStage):
     
     async def _handle_purchase_intent(self, context: PipelineContext):
         """
-        Handle purchase intent - may create/update lead and notify supervisor.
+        Handle purchase intent - manages payment flow based on configuration.
         
-        This method:
-        1. Checks if purchase intent indicates a completed sale
-        2. Updates lead status to 'converted' if sale is complete
-        3. Notifies supervisor about the completed sale
+        If QR payment is enabled:
+        1. Send QR code to customer
+        2. Wait for payment proof (image/document)
+        3. Forward proof to supervisor with purchase details
+        
+        If QR payment is disabled:
+        1. Notify supervisor of confirmed sale
+        2. Mark lead as converted
         """
         context.action_type = "purchase_intent"
         
-        # Check if this is a confirmed purchase (you may want to refine this logic)
-        is_sale_complete = await self._is_sale_complete(context)
+        # Check if this is a confirmed purchase
+        is_purchase_confirmed = await self._is_purchase_confirmed(context)
         
-        if is_sale_complete:
-            # Mark lead as converted
+        if not is_purchase_confirmed:
+            # Just qualify the lead, not ready to purchase yet
+            context.action_result = {
+                "lead_id": context.lead_info.get("id") if context.lead_info else None,
+                "action": "qualify_lead",
+                "stage": "considering"
+            }
+            return
+        
+        # Purchase is confirmed, check payment method
+        qr_payment_enabled = await self._is_qr_payment_enabled(context)
+        
+        if qr_payment_enabled:
+            # QR payment flow
+            await self._handle_qr_payment_flow(context)
+        else:
+            # Traditional flow: directly notify supervisor
             lead_id = await self._mark_lead_as_converted(context)
-            
-            # Notify supervisor about completed sale
             await self._notify_supervisor_sale_completed(context)
             
             context.action_result = {
                 "lead_id": lead_id,
                 "action": "sale_completed",
+                "payment_method": "non_qr",
                 "notified": True
             }
-        else:
-            # Just qualify the lead
+    
+    async def _is_purchase_confirmed(self, context: PipelineContext) -> bool:
+        """
+        Determine if the customer has confirmed their purchase.
+        
+        Uses keyword-based detection to identify purchase confirmation.
+        Does NOT require products in context since customer may have already
+        seen product info in previous messages.
+        """
+        message_lower = context.message_body.lower()
+        
+        # Keywords that indicate purchase confirmation
+        confirmation_keywords = [
+            "confirmo",
+            "confirmado",
+            "confirmar",
+            "compro",
+            "comprar",
+            "acepto",
+            "si, lo quiero",
+            "lo quiero",
+            "proceder con la compra",
+            "realizar el pago",
+            "hacer el pago",
+            "pagar ahora",
+            "enviar",
+            "envío",
+            "quiero comprar",
+            "voy a comprar",
+            "compro el plan",
+            "quiero el plan",
+        ]
+        
+        # Check if any confirmation keyword is in the message
+        for keyword in confirmation_keywords:
+            if keyword in message_lower:
+                return True
+        
+        return False
+    
+    async def _is_qr_payment_enabled(self, context: PipelineContext) -> bool:
+        """Check if QR payment is enabled for this tenant."""
+        try:
+            from app.core.database import get_session_factory
+            from app.models import ConfigurationTenant
+            from sqlalchemy import select
+            
+            session_factory = get_session_factory()
+            async with session_factory() as db:
+                stmt = (
+                    select(ConfigurationTenant)
+                    .where(ConfigurationTenant.tenant_id == context.tenant_id)
+                    .where(ConfigurationTenant.active == True)
+                )
+                result = await db.execute(stmt)
+                config = result.scalar_one_or_none()
+                
+                if config:
+                    return config.is_qr_payment_enabled()
+                
+                return False
+                
+        except Exception as e:
+            self.log_error(
+                "failed_to_check_qr_payment",
+                tenant_id=context.tenant_id,
+                error=str(e)
+            )
+            return False
+    
+    async def _get_qr_payment_url(self, context: PipelineContext) -> str:
+        """Get QR payment URL from configuration."""
+        try:
+            from app.core.database import get_session_factory
+            from app.models import ConfigurationTenant
+            from sqlalchemy import select
+            
+            session_factory = get_session_factory()
+            async with session_factory() as db:
+                stmt = (
+                    select(ConfigurationTenant)
+                    .where(ConfigurationTenant.tenant_id == context.tenant_id)
+                    .where(ConfigurationTenant.active == True)
+                )
+                result = await db.execute(stmt)
+                config = result.scalar_one_or_none()
+                
+                if config:
+                    return config.get_qr_payment_url()
+                
+                return ""
+                
+        except Exception as e:
+            self.log_error(
+                "failed_to_get_qr_payment_url",
+                tenant_id=context.tenant_id,
+                error=str(e)
+            )
+            return ""
+    
+    async def _handle_qr_payment_flow(self, context: PipelineContext):
+        """
+        Handle QR payment flow:
+        1. Send QR code to customer
+        2. Mark action as waiting for payment proof
+        3. Response generator will wait for next message (payment proof)
+        """
+        qr_url = await self._get_qr_payment_url(context)
+        
+        self.log_info(
+            "qr_payment_flow_started",
+            tenant_id=context.tenant_id,
+            qr_enabled=True,
+            qr_url_present=bool(qr_url)
+        )
+        
+        if not qr_url:
+            self.log_error(
+                "qr_payment_enabled_but_no_url",
+                tenant_id=context.tenant_id
+            )
             context.action_result = {
-                "lead_id": context.lead_info.get("id") if context.lead_info else None,
-                "action": "qualify_lead",
-                "notified": False
+                "error": "QR URL not configured",
+                "action": "qr_payment_failed"
+            }
+            return
+        
+        # Send QR to customer via NotificationService
+        try:
+            customer_name = context.profile_name or (
+                context.lead_info.get("name") if context.lead_info else None
+            )
+            
+            self.log_info(
+                "sending_qr_code_to_customer",
+                customer=context.sender_phone,
+                customer_name=customer_name,
+                qr_url=qr_url,
+                agent=context.recipient_phone
+            )
+            
+            await NotificationService.send_qr_payment_request(
+                customer_phone=context.sender_phone,
+                agent_phone=context.recipient_phone,
+                qr_image_url=qr_url,
+                customer_name=customer_name
+            )
+            
+            context.action_result = {
+                "action": "awaiting_payment_proof",
+                "qr_sent": True,
+                "stage": "payment_pending",
+                "qr_url": qr_url
+            }
+            
+            self.log_info(
+                "qr_payment_flow_initiated",
+                customer=context.sender_phone,
+                lead_id=context.lead_id,
+                qr_url=qr_url
+            )
+            
+        except Exception as e:
+            self.log_error(
+                "failed_to_send_qr_payment",
+                customer=context.sender_phone,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            context.action_result = {
+                "action": "qr_payment_failed",
+                "error": str(e)
             }
     
     async def _is_sale_complete(self, context: PipelineContext) -> bool:
@@ -164,7 +353,7 @@ class ActionExecutorStage(BasePipelineStage):
         """Mark the lead as converted in the database."""
         
         if not context.lead_id:
-            self.log_warning("no_lead_to_convert", context=context)
+            self.log_error("no_lead_to_convert", context=context)
             return None
         
         try:
@@ -205,7 +394,7 @@ class ActionExecutorStage(BasePipelineStage):
         supervisor_number = context.agent_config.get("integrations", {}).get("supervisor_number")
         
         if not supervisor_number:
-            self.log_warning(
+            self.log_error(
                 "no_supervisor_number_configured",
                 agent_instance_id=context.agent_instance_id
             )
@@ -310,8 +499,91 @@ class ActionExecutorStage(BasePipelineStage):
                 )
                 context.action_result = {"notified": False, "error": str(e)}
         else:
-            self.log_warning("no_supervisor_for_handoff")
+            self.log_error("no_supervisor_for_handoff")
             context.action_result = {"notified": False, "error": "No supervisor configured"}
+    
+    async def _handle_payment_proof_received(self, context: PipelineContext):
+        """
+        Handle payment proof submission from customer.
+        
+        This is called when customer sends image/document as payment proof
+        after QR payment request was sent.
+        
+        Actions:
+        1. Mark lead as converted
+        2. Forward payment proof to supervisor with purchase details
+        """
+        context.action_type = "payment_proof_received"
+        
+        if not context.media_urls or len(context.media_urls) == 0:
+            self.log_error(
+                "payment_proof_no_media",
+                lead_id=context.lead_id
+            )
+            context.action_result = {
+                "error": "No payment proof found",
+                "action": "payment_proof_invalid"
+            }
+            return
+        
+        try:
+            # Mark lead as converted
+            lead_id = await self._mark_lead_as_converted(context)
+            
+            # Get supervisor number
+            supervisor_number = context.agent_config.get("integrations", {}).get("supervisor_number")
+            
+            if supervisor_number:
+                customer_name = context.profile_name or (
+                    context.lead_info.get("name") if context.lead_info else None
+                )
+                proof_url = context.media_urls[0]  # Use first media URL
+                
+                # Forward payment proof to supervisor
+                await NotificationService.forward_payment_proof_to_supervisor(
+                    supervisor_number=supervisor_number,
+                    agent_phone=context.recipient_phone,
+                    customer_phone=context.sender_phone,
+                    customer_name=customer_name,
+                    products=context.relevant_products,
+                    proof_media_url=proof_url,
+                    lead_info=context.lead_info
+                )
+                
+                context.action_result = {
+                    "lead_id": lead_id,
+                    "action": "payment_proof_forwarded",
+                    "supervisor_notified": True,
+                    "proof_media_count": len(context.media_urls)
+                }
+                
+                self.log_info(
+                    "payment_proof_processed",
+                    lead_id=lead_id,
+                    supervisor=supervisor_number,
+                    customer=context.sender_phone
+                )
+            else:
+                self.log_error(
+                    "no_supervisor_for_payment_proof",
+                    lead_id=lead_id
+                )
+                context.action_result = {
+                    "lead_id": lead_id,
+                    "error": "Supervisor not configured",
+                    "action": "payment_proof_received_but_not_forwarded"
+                }
+                
+        except Exception as e:
+            self.log_error(
+                "failed_to_process_payment_proof",
+                lead_id=context.lead_id,
+                error=str(e)
+            )
+            context.action_result = {
+                "error": str(e),
+                "action": "payment_proof_processing_failed"
+            }
     
     async def _handle_general_question(self, context: PipelineContext):
         """Handle general question."""

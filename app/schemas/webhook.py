@@ -26,7 +26,7 @@ class TwilioWebhookRequest(BaseModel):
     To: str = Field(..., description="Recipient's WhatsApp number (your agent)")
     
     # Message content
-    Body: str = Field(..., description="Message text content")
+    Body: str = Field(default="", description="Message text content")
     NumMedia: str = Field(default="0", description="Number of media items")
     
     # Optional profile info
@@ -37,9 +37,17 @@ class TwilioWebhookRequest(BaseModel):
     Latitude: Optional[str] = Field(None, description="Latitude if location shared")
     Longitude: Optional[str] = Field(None, description="Longitude if location shared")
     
-    # Media URLs (if any)
+    # Media URLs (supports up to 5 media items)
     MediaUrl0: Optional[str] = Field(None, description="First media URL")
     MediaContentType0: Optional[str] = Field(None, description="First media content type")
+    MediaUrl1: Optional[str] = Field(None, description="Second media URL")
+    MediaContentType1: Optional[str] = Field(None, description="Second media content type")
+    MediaUrl2: Optional[str] = Field(None, description="Third media URL")
+    MediaContentType2: Optional[str] = Field(None, description="Third media content type")
+    MediaUrl3: Optional[str] = Field(None, description="Fourth media URL")
+    MediaContentType3: Optional[str] = Field(None, description="Fourth media content type")
+    MediaUrl4: Optional[str] = Field(None, description="Fifth media URL")
+    MediaContentType4: Optional[str] = Field(None, description="Fifth media content type")
     
     @property
     def sender_phone(self) -> str:

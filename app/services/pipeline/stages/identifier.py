@@ -98,6 +98,9 @@ class IdentificationStage(BasePipelineStage):
                 context.sender_phone
             )
             context.conversation_id = conversation.id
+            context.current_state = conversation.current_state
+            context.cart_contents = conversation.cart_contents
+            context.fulfillment_type = conversation.fulfillment_type
         
         self.log_info(
             "identification_completed",

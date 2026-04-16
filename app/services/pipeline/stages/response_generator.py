@@ -551,8 +551,15 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
                     action_type=context.action_type
                 )
                 
-                # Mark the messages field as modified so SQLAlchemy detects the change
+                # Update state machine fields
+                if context.current_state is not None:
+                    conversation.current_state = context.current_state
+                conversation.cart_contents = context.cart_contents
+                conversation.fulfillment_type = context.fulfillment_type
+                
+                # Mark the fields as modified so SQLAlchemy detects the change
                 attributes.flag_modified(conversation, "messages")
+                attributes.flag_modified(conversation, "cart_contents")
                 
                 await db.commit()
                 

@@ -134,6 +134,25 @@ class ContextBuilderStage(BasePipelineStage):
                 context.sender_phone
             )
         
+        # Add specific instructions based on ConversationState
+        from app.schemas.pipeline import ConversationState
+        state_instructions = ""
+        current_state = context.current_state
+        if current_state == ConversationState.BROWSING:
+            state_instructions = "The user is currently browsing. Answer their questions about our products."
+        elif current_state == ConversationState.CART_BUILDING:
+            state_instructions = f"The user is adding items to their cart. Current cart: {context.cart_contents}. Ask if they need anything else before checkout."
+        elif current_state == ConversationState.FULFILLMENT_COORD:
+            state_instructions = "The user is ready to checkout. Ask them if they want 'Delivery' or 'Store Pickup'. If Delivery, explicitly ask them to send a native WhatsApp Location Pin."
+        elif current_state == ConversationState.AWAITING_RECEIPT:
+            state_instructions = "We are waiting for the user to send a screenshot of their QR payment receipt. Do not answer unrelated questions. Remind them to send the image."
+            
+        if state_instructions:
+            if not context.agent_config.get("operations_info"):
+                context.agent_config["operations_info"] = {}
+            existing_process = context.agent_config["operations_info"].get("sales_process", "")
+            context.agent_config["operations_info"]["sales_process"] = f"{existing_process}\n\nINSTRUCCIONES DE ESTADO ACTUAL:\n{state_instructions}".strip()
+
         self.log_info(
             "context_built",
             conversation_id=context.conversation_id,

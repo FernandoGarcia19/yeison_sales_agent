@@ -2,8 +2,10 @@
 SalesConversation model - represents an ongoing conversation with a customer.
 """
 
+import enum
 from typing import TYPE_CHECKING, List, Dict, Any, Optional
 from sqlalchemy import String, BigInteger, ForeignKey, JSON
+from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, ActiveMixin
@@ -11,6 +13,15 @@ from app.models.base import Base, TimestampMixin, ActiveMixin
 if TYPE_CHECKING:
     from app.models.agent_instance import AgentInstance
     from app.models.lead import Lead
+
+
+class ConversationState(str, enum.Enum):
+    BROWSING = "browsing"
+    CART_BUILDING = "cart_building"
+    FULFILLMENT_COORD = "fulfillment_coord"
+    AWAITING_RECEIPT = "awaiting_receipt"
+    ORDER_COMPLETED = "order_completed"
+    PAUSED = "paused"
 
 
 class SalesConversation(Base, TimestampMixin, ActiveMixin):
@@ -49,6 +60,21 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
         JSON,
         nullable=False,
         default=list
+    )
+    current_state: Mapped[ConversationState] = mapped_column(
+        SQLEnum(ConversationState, name="conversation_state_enum", create_type=False),
+        nullable=False,
+        default=ConversationState.BROWSING
+    )
+    cart_contents: Mapped[Dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict
+    )
+    fulfillment_type: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="pickup, delivery, or null"
     )
     
     # Relationships

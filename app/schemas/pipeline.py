@@ -35,6 +35,15 @@ class PipelineStage(str, Enum):
     RESPONSE_GENERATION = "response_generation"
 
 
+class ConversationState(str, Enum):
+    BROWSING = "browsing"
+    CART_BUILDING = "cart_building"
+    FULFILLMENT_COORD = "fulfillment_coord"
+    AWAITING_RECEIPT = "awaiting_receipt"
+    ORDER_COMPLETED = "order_completed"
+    PAUSED = "paused"
+
+
 class PipelineContext(BaseModel):
     """
     Context data that flows through the pipeline stages.
@@ -63,6 +72,11 @@ class PipelineContext(BaseModel):
     agent_config: Optional[Dict[str, Any]] = Field(None, description="Agent configuration")
     conversation_id: Optional[int] = Field(None, description="Conversation ID")
     lead_id: Optional[int] = Field(None, description="Lead ID if exists")
+    
+    # State Machine tracking
+    current_state: Optional[ConversationState] = Field(None, description="Current conversation state")
+    cart_contents: Dict[str, Any] = Field(default_factory=dict, description="Current cart items")
+    fulfillment_type: Optional[str] = Field(None, description="Delivery or pickup")
     
     # Classification stage results
     intent: Optional[IntentType] = Field(None, description="Classified intent")

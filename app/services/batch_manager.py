@@ -65,6 +65,8 @@ class BatchMessage:
 
 # Global registry of active batch timers
 _active_timers: Dict[str, asyncio.Task] = {}
+# Strong references for background tasks to prevent them from being garbage collected
+_background_tasks = set()
 
 
 async def enqueue_message(
@@ -124,7 +126,9 @@ async def enqueue_message(
             _active_timers[timer_id].cancel()
             del _active_timers[timer_id]
         # Process immediately
-        asyncio.create_task(_process_batch(agent_phone, user_phone))
+        task = asyncio.create_task(_process_batch(agent_phone, user_phone))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
         return True
     
     # Start batch timer if not already running
@@ -142,6 +146,9 @@ async def enqueue_message(
     timer_task = asyncio.create_task(
         _batch_timer(agent_phone, user_phone)
     )
+    _background_tasks.add(timer_task)
+    timer_task.add_done_callback(_background_tasks.discard)
+    
     _active_timers[timer_id] = timer_task
     
     logger.info(f"Started batch timer for {queue_key} ({settings.batch_window_seconds}s)")

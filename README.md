@@ -54,14 +54,16 @@ The system implements intelligent message batching to handle rapid-fire messages
 
 ### Pipeline Stages
 
-The agent processes each message through 6 sequential stages:
+The agent processes each message through a dynamically orchestrated pipeline, powered by a ReAct (Reasoning and Acting) graph, rather than rigid sequential steps. 
 
 1. **Validation** - Validates message format and content
 2. **Identification** - Identifies tenant, agent instance, and conversation
-3. **Classification** - Classifies user intent using AI/LLM
-4. **Context Building** - Builds conversation context with history and data
-5. **Action Execution** - Executes appropriate actions based on intent
-6. **Response Generation** - Generates and sends response via WhatsApp
+3. **ReasoningNode / Context Building** - Replaces the old rigid "Classification/Context" stages. Uses a LangGraph-based `ReasoningNode` that evaluates the user's input and intelligently invokes Langchain tools *on-demand* to fetch exactly what it needs:
+   - `get_tenant_inventory`: Queries PostgreSQL for product pricing and availability.
+   - `get_tenant_policies`: Retrieves business hours, delivery rules, and sales processes.
+   - `get_lead_info`: Checks for prior lead history or score.
+4. **Action Execution** - Executes any final CRM mutations or system actions based on the ReasoningNode's finalized intent.
+5. **Response Generation** - The LLM synthesizes the tool outputs and conversation history into a natural WhatsApp response.
 
 ## Project Structure
 
@@ -193,17 +195,14 @@ products = await db.execute(
 - Finds or creates conversation
 - Uses Redis caching for performance
 
-#### Classification Stage
-- Classifies user intent using AI/LLM
-- Currently uses simple keyword matching (placeholder)
-- **TODO**: Implement OpenAI/Anthropic integration
-
-#### Context Builder Stage
-- Loads conversation history
-- Queries relevant inventory items
-- Loads lead information if exists
-- Prepares data for AI response generation
-- **Batching**: Combines multiple message bodies with newlines for unified context
+#### Classification & Context Building (Now Handled by ReAct / ReasoningNode)
+- **Replaced**: The rigid classification and massive up-front context loading pipeline has been replaced by a sophisticated LangGraph-based `ReasoningNode`.
+- **On-Demand Tool Binding**: Instead of querying PostgreSQL up-front for everything (inventory, tenant config, lead info), the `ReasoningNode` uses LLM tool-calling natively (`llm.bind_tools()`) to fetch data exactly when needed.
+- **Available Tools**:
+  - `get_tenant_inventory`: Queries DB for availability.
+  - `get_tenant_policies`: Retrieves specific rules and schedules.
+  - `get_lead_info`: Checks DB for existing external user records.
+- **Dynamic Context**: Combines multiple message bodies (if batched) and actively reasons about the best next steps, significantly reducing token usage and unnecessary database loads.
 
 #### Action Executor Stage
 - Routes to appropriate action based on intent

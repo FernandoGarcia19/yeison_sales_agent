@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     backend_api_key: Optional[str] = None
     backend_api_timeout: int = 30
     
+    # Telegram settings
+    telegram_bot_token: Optional[str] = "8205219718:AAGSyft-_7Tw0IWv_DWioWUoLCkqc-JliB8"
+    telegram_chat_id: Optional[str] = "59922338329"
+
     class Config:
         env_file = ".env"
         case_sensitive = False

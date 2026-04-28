@@ -143,7 +143,13 @@ class ContextBuilderStage(BasePipelineStage):
         elif current_state == ConversationState.CART_BUILDING:
             state_instructions = f"The user is adding items to their cart. Current cart: {context.cart_contents}. Ask if they need anything else before checkout."
         elif current_state == ConversationState.FULFILLMENT_COORD:
-            state_instructions = "The user is ready to checkout. Do not ask about delivery details. Simply generate the final order summary, provide the payment QR instructions, and tell them we are waiting for their payment screenshot."
+            state_instructions = (
+                "The user is ready to checkout. You MUST use the get_checkout_requirements tool "
+                "to know what data points to collect. DO NOT provide the payment QR code until the user "
+                "has provided all required information. If information is missing, ask the user. "
+                "Once all data is collected and saved via save_checkout_data, generate the final order summary "
+                "and provide payment instructions."
+            )
         elif current_state == ConversationState.AWAITING_RECEIPT:
             state_instructions = "We are waiting for the user to send a screenshot of their QR payment receipt. Do not answer unrelated questions. Remind them to send the image."
             

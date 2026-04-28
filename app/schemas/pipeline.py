@@ -76,6 +76,7 @@ class PipelineContext(BaseModel):
     # State Machine tracking
     current_state: Optional[ConversationState] = Field(None, description="Current conversation state")
     cart_contents: Dict[str, Any] = Field(default_factory=dict, description="Current cart items")
+    checkout_data: Dict[str, Any] = Field(default_factory=dict, description="Current checkout structured data")
     fulfillment_type: Optional[str] = Field(None, description="Delivery or pickup")
     
     # Classification stage results
@@ -92,6 +93,12 @@ class PipelineContext(BaseModel):
         description="Relevant inventory items"
     )
     lead_info: Optional[Dict[str, Any]] = Field(None, description="Lead information")
+
+    # Agentic reasoning
+    agent_scratchpad: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Reasoning history for the current turn"
+    )
     
     # Action execution results
     action_type: Optional[str] = Field(None, description="Action that was executed")

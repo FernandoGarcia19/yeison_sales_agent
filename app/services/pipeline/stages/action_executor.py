@@ -7,7 +7,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
-from app.schemas.pipeline import PipelineContext, IntentType
+from app.schemas.pipeline import PipelineContext, IntentType, ConversationState
 from app.services.pipeline.base import BasePipelineStage, ActionExecutionError
 from app.services.notification_service import NotificationService
 from app.models import Lead
@@ -130,6 +130,8 @@ class ActionExecutorStage(BasePipelineStage):
             # Traditional flow: directly notify supervisor
             lead_id = await self._mark_lead_as_converted(context)
             await self._notify_supervisor_sale_completed(context)
+
+            context.current_state = ConversationState.ORDER_COMPLETED
             
             context.action_result = {
                 "lead_id": lead_id,
@@ -291,6 +293,7 @@ class ActionExecutorStage(BasePipelineStage):
                 "stage": "payment_pending",
                 "qr_url": qr_url
             }
+            context.current_state = ConversationState.AWAITING_RECEIPT
             
             self.log_info(
                 "qr_payment_flow_initiated",
@@ -556,6 +559,7 @@ class ActionExecutorStage(BasePipelineStage):
                     "supervisor_notified": True,
                     "proof_media_count": len(context.media_urls)
                 }
+                context.current_state = ConversationState.ORDER_COMPLETED
                 
                 self.log_info(
                     "payment_proof_processed",

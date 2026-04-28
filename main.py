@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.core.database import close_db_connections
 from app.core.redis_client import close_redis_connection
 from app.api.v1.webhooks import router as webhook_router
+from app.api.v1.telegram_webhook import router as telegram_webhook_router
 
 
 @asynccontextmanager
@@ -29,6 +30,7 @@ app = FastAPI(
 
 # Include routers
 app.include_router(webhook_router, prefix="/api/v1")
+app.include_router(telegram_webhook_router, prefix="/api/v1")
 
 # Basic route
 @app. get("/")

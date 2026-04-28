@@ -38,3 +38,7 @@ openai==1.6.1
 
 # Background Tasks
 celery==5.3.4
+
+langgraph
+langchain
+langchain-openai

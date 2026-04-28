@@ -123,7 +123,7 @@ class ResponseGeneratorStage(BasePipelineStage):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=settings.openai_temperature,
-            max_tokens=settings.openai_max_tokens
+            extra_body={"max_completion_tokens": settings.openai_max_tokens}
         )
         
         response_text = response.choices[0].message.content.strip()

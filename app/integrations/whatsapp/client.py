@@ -75,6 +75,7 @@ async def send_whatsapp_message(
             "whatsapp_message_sent",
             message_sid=message.sid,
             to=to,
+            from_=from_number,
             status=message.status
         )
         

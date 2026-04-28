@@ -208,8 +208,8 @@ Responde con el JSON de clasificación."""
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.3,  
-                max_tokens=200,
+                temperature=0.3,
+                extra_body={"max_completion_tokens": 200},
                 response_format={"type": "json_object"}
             )
             

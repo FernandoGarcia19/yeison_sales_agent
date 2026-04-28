@@ -230,17 +230,11 @@ async def _process_batch(agent_phone: str, user_phone: str):
         
         if result.success:
             logger.info(
-                f"Batch processed successfully",
-                message_sid=result.message_sid,
-                intent=result.intent,
-                action=result.action_executed,
-                response_sent=result.response_sent
+                f"Batch processed successfully (message_sid={result.message_sid}, intent={result.intent}, action={result.action_executed}, response_sent={result.response_sent})"
             )
         else:
             logger.error(
-                f"Batch processing failed",
-                message_sid=result.message_sid,
-                error=result.error
+                f"Batch processing failed (message_sid={result.message_sid}, error={result.error})"
             )
     
     except Exception as e:

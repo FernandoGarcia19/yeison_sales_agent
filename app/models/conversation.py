@@ -61,10 +61,10 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
         nullable=False,
         default=list
     )
-    current_state: Mapped[ConversationState] = mapped_column(
-        SQLEnum(ConversationState, name="conversation_state_enum", create_type=False),
+    current_state: Mapped[str] = mapped_column(
+        String(50),
         nullable=False,
-        default=ConversationState.BROWSING
+        default=ConversationState.BROWSING.value
     )
     cart_contents: Mapped[Dict[str, Any]] = mapped_column(
         JSON,

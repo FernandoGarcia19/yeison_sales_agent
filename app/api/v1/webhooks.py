@@ -157,9 +157,9 @@ async def receive_twilio_webhook(
     
     # Return immediate response to Twilio (must respond within 15 seconds)
     return Response(
-        content="",
+        content="<Response></Response>",
         status_code=200,
-        media_type="text/plain"
+        media_type="application/xml"
     )
 
 

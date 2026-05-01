@@ -31,8 +31,7 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
     Messages are stored as JSONB in the 'messages' field for flexibility.
     Each message contains: role, content, timestamp, intent, etc.
     
-    The external_user_id represents the WhatsApp user (could be lead_id
-    or a unique identifier for the customer).
+    The external_user_id is the customer's WhatsApp phone number (E.164).
     """
     
     __tablename__ = "sales_conversation"
@@ -48,13 +47,7 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
         String(20),
         nullable=False,
         index=True,
-        comment="WhatsApp phone number in E.164 format (e.g., +584129876543)"
-    )
-    lead_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger,
-        ForeignKey("lead.id"),
-        nullable=True,
-        index=True
+        comment="WhatsApp phone number in E.164 format"
     )
     messages: Mapped[List[Dict[str, Any]]] = mapped_column(
         JSON,
@@ -82,10 +75,10 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
         "AgentInstance",
         back_populates="conversations"
     )
-    lead: Mapped[Optional["Lead"]] = relationship(
+    leads: Mapped[List["Lead"]] = relationship(
         "Lead",
-        back_populates="conversations",
-        foreign_keys=[lead_id]
+        back_populates="conversation",
+        foreign_keys="Lead.conversation_id"
     )
     
     def __repr__(self) -> str:

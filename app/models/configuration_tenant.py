@@ -95,9 +95,15 @@ class ConfigurationTenant(Base, TimestampMixin):
         if not self.products:
             return False
         return bool(self.products.get("qr_payment_enabled", False))
-    
+
+    def get_qr_object_key(self) -> str:
+        """Get the R2 object key for the QR code image."""
+        if not self.products:
+            return ""
+        return self.products.get("qr_object_key", "")
+
     def get_qr_payment_url(self) -> str:
-        """Get QR payment URL if available."""
+        """Legacy fallback: raw URL stored directly. Prefer get_qr_object_key()."""
         if not self.products:
             return ""
         return self.products.get("qr_payment_url", "")

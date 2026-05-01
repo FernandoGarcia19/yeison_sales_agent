@@ -47,8 +47,14 @@ class Settings(BaseSettings):
     backend_api_timeout: int = 30
     
     # Telegram settings
-    telegram_bot_token: Optional[str] = "8205219718:AAGSyft-_7Tw0IWv_DWioWUoLCkqc-JliB8"
-    telegram_chat_id: Optional[str] = "59922338329"
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+
+    # Cloudflare R2 Storage
+    r2_endpoint_url: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = "yeison-storage"
 
     class Config:
         env_file = ".env"

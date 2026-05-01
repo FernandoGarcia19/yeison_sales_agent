@@ -110,7 +110,7 @@ class ContextBuilderStage(BasePipelineStage):
                 )
             
             # Load relevant inventory based on intent (with tenant-scoped caching)
-            if context.intent in ["product_inquiry", "pricing_question", "availability_check"]:
+            if context.intent in ["product_inquiry", "pricing_question", "availability_check", "purchase_intent"]:
                 inventory_cache_key = build_inventory_cache_key(context.tenant_id)
                 cached_inventory = await cache_get(inventory_cache_key)
                 
@@ -126,13 +126,13 @@ class ContextBuilderStage(BasePipelineStage):
                     # Cache inventory for 10 minutes
                     await cache_set(inventory_cache_key, context.relevant_products, ttl=600)
             
-            # Load lead info if exists (no caching - data changes frequently)
-            # TODO: Refactorizar logica de lead (Ferru)
-            context.lead_info = await self._load_lead_info(
-                db,
-                context.tenant_id,
-                context.sender_phone
-            )
+            # Lead info already populated by IdentificationStage — skip re-query
+            if not context.lead_info:
+                context.lead_info = await self._load_lead_info(
+                    db,
+                    context.tenant_id,
+                    context.sender_phone
+                )
         
         # Add specific instructions based on ConversationState
         from app.schemas.pipeline import ConversationState
@@ -143,15 +143,25 @@ class ContextBuilderStage(BasePipelineStage):
         elif current_state == ConversationState.CART_BUILDING:
             state_instructions = f"The user is adding items to their cart. Current cart: {context.cart_contents}. Ask if they need anything else before checkout."
         elif current_state == ConversationState.FULFILLMENT_COORD:
+            missing = [
+                f for f in (context.agent_config or {}).get("checkout_requirements", ["Nombre completo", "Dirección de entrega", "NIT"])
+                if not context.checkout_data.get(f)
+            ]
+            collected_str = ", ".join(f"{k}: {v}" for k, v in context.checkout_data.items()) if context.checkout_data else "ninguno aún"
+            missing_str = ", ".join(missing) if missing else "todos recopilados"
             state_instructions = (
-                "The user is ready to checkout. You MUST use the get_checkout_requirements tool "
-                "to know what data points to collect. DO NOT provide the payment QR code until the user "
-                "has provided all required information. If information is missing, ask the user. "
-                "Once all data is collected and saved via save_checkout_data, generate the final order summary "
-                "and provide payment instructions."
+                f"El usuario está listo para finalizar su compra. "
+                f"Datos ya recopilados: {collected_str}. "
+                f"Datos que aún faltan: {missing_str}. "
+                f"Pide amablemente la información faltante. NO envíes el QR ni menciones el pago "
+                f"hasta que el usuario haya proporcionado todos los datos requeridos."
             )
         elif current_state == ConversationState.AWAITING_RECEIPT:
-            state_instructions = "We are waiting for the user to send a screenshot of their QR payment receipt. Do not answer unrelated questions. Remind them to send the image."
+            proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
+            if proof_submitted:
+                state_instructions = "El usuario ya envió su comprobante de pago y está esperando la aprobación del supervisor. Informa amablemente que estamos revisando su pago y que recibirán una confirmación pronto. NO pidas el comprobante de nuevo."
+            else:
+                state_instructions = "Estamos esperando que el usuario envíe una foto o captura de su comprobante de pago QR. No respondas preguntas no relacionadas. Recuérdales amablemente que deben enviar la imagen del comprobante."
             
         if state_instructions:
             if not context.agent_config.get("operations_info"):

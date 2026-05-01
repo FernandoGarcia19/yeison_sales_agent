@@ -2,22 +2,26 @@
 Action executor stage - executes actions based on intent.
 """
 
-from typing import Optional
+import json
+from typing import Optional, List
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
+from openai import AsyncOpenAI
+
 from app.schemas.pipeline import PipelineContext, IntentType, ConversationState
 from app.services.pipeline.base import BasePipelineStage, ActionExecutionError
 from app.services.notification_service import NotificationService
-from app.models import Lead
+from app.models import Lead, SalesConversation
 from app.core.database import get_session_factory
+from app.core.config import settings
 
 
 class ActionExecutorStage(BasePipelineStage):
     """
     Stage 5: Execute actions based on classified intent.
-    
+
     Actions:
     - Check inventory availability
     - Create/update lead (via main backend API)
@@ -25,16 +29,52 @@ class ActionExecutorStage(BasePipelineStage):
     - Send product information
     - Log interaction
     """
-    
+
+    def __init__(self):
+        super().__init__()
+        self._client: Optional[AsyncOpenAI] = None
+
+    def _get_client(self) -> AsyncOpenAI:
+        if self._client is None:
+            if settings.use_openrouter:
+                self._client = AsyncOpenAI(
+                    api_key=settings.openrouter_api_key,
+                    base_url="https://openrouter.ai/api/v1"
+                )
+            else:
+                self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        return self._client
+
     async def process(self, context: PipelineContext) -> PipelineContext:
         """Execute action based on intent."""
-        
+
         self.log_info(
             "executing_action",
             intent=context.intent.value if context.intent else None,
             action_type=context.action_type
         )
-        
+
+        # If waiting for payment proof, only allow payment_proof_received through
+        if context.current_state == ConversationState.AWAITING_RECEIPT:
+            if context.action_type != "payment_proof_received":
+                proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
+                if proof_submitted:
+                    context.action_type = "payment_review_pending"
+                    context.action_result = {"action": "payment_review_pending"}
+                else:
+                    context.action_type = "awaiting_receipt_reminder"
+                    context.action_result = {"action": "awaiting_receipt_reminder"}
+                self.log_info("awaiting_receipt_non_proof_message", action_type=context.action_type)
+                return context
+
+        # If actively collecting checkout data, handle extraction/completion first.
+        # Skip if action is already payment_proof_received — let it fall through to its handler.
+        if context.current_state == ConversationState.FULFILLMENT_COORD and context.action_type != "payment_proof_received":
+            await self._handle_checkout_collection(context)
+            if context.action_result is not None:
+                self.log_info("action_executed", action_type=context.action_type)
+                return context
+
         # Check if this is a payment proof submission (special case)
         if context.action_type == "payment_proof_received":
             await self._handle_payment_proof_received(context)
@@ -107,10 +147,18 @@ class ActionExecutorStage(BasePipelineStage):
         2. Mark lead as converted
         """
         context.action_type = "purchase_intent"
-        
-        # Check if this is a confirmed purchase
+
         is_purchase_confirmed = await self._is_purchase_confirmed(context)
-        
+
+        # If a previous purchase cycle is complete, start a fresh one when the
+        # customer is confirming a new purchase.
+        if context.current_state == ConversationState.ORDER_COMPLETED:
+            if is_purchase_confirmed:
+                await self._start_new_purchase_cycle(context)
+            else:
+                context.action_result = {"action": "order_already_completed"}
+                return
+
         if not is_purchase_confirmed:
             # Just qualify the lead, not ready to purchase yet
             context.action_result = {
@@ -119,25 +167,55 @@ class ActionExecutorStage(BasePipelineStage):
                 "stage": "considering"
             }
             return
-        
-        # Purchase is confirmed, check payment method
+
+        # Capture which products (and quantities) the user wants — only on the
+        # first turn of this purchase intent so we don't overwrite a stored cart.
+        if not context.cart_contents.get("items"):
+            extracted = await self._extract_purchase_items(
+                context.message_body, context.conversation_history, context.relevant_products
+            )
+            selected = []
+            for entry in extracted:
+                prod = next(
+                    (p for p in context.relevant_products if str(p.get("id")) == str(entry.get("id"))),
+                    None,
+                )
+                if prod:
+                    selected.append({**prod, "quantity": int(entry.get("quantity", 1))})
+            if not selected and len(context.relevant_products) == 1:
+                # Single product available — treat it as the selection
+                selected = [{**context.relevant_products[0], "quantity": 1}]
+            if selected:
+                context.cart_contents["items"] = selected
+
+        # Gate: all checkout data must be collected before payment
+        required_fields = self._get_checkout_requirements(context)
+        missing_fields = [f for f in required_fields if not context.checkout_data.get(f)]
+        if missing_fields:
+            context.current_state = ConversationState.FULFILLMENT_COORD
+            context.action_type = "collect_checkout_data"
+            context.action_result = {
+                "action": "collect_checkout_data",
+                "required_fields": required_fields,
+                "missing_fields": missing_fields,
+                "collected": context.checkout_data,
+            }
+            return
+
+        # Purchase is confirmed and checkout complete — check payment method
         qr_payment_enabled = await self._is_qr_payment_enabled(context)
-        
+
         if qr_payment_enabled:
-            # QR payment flow
             await self._handle_qr_payment_flow(context)
         else:
-            # Traditional flow: directly notify supervisor
             lead_id = await self._mark_lead_as_converted(context)
             await self._notify_supervisor_sale_completed(context)
-
             context.current_state = ConversationState.ORDER_COMPLETED
-            
             context.action_result = {
                 "lead_id": lead_id,
                 "action": "sale_completed",
                 "payment_method": "non_qr",
-                "notified": True
+                "notified": True,
             }
     
     async def _is_purchase_confirmed(self, context: PipelineContext) -> bool:
@@ -180,44 +258,68 @@ class ActionExecutorStage(BasePipelineStage):
         return False
     
     async def _is_qr_payment_enabled(self, context: PipelineContext) -> bool:
-        """Check if QR payment is enabled for this tenant."""
+        """
+        Check if QR payment is enabled for the active agent.
+        Reads agent_instance.configuration.sales_process.QR_payment.
+        """
         try:
             from app.core.database import get_session_factory
-            from app.models import ConfigurationTenant
+            from app.models import AgentInstance
             from sqlalchemy import select
-            
+
+            if not context.agent_instance_id:
+                return False
+
             session_factory = get_session_factory()
             async with session_factory() as db:
-                stmt = (
-                    select(ConfigurationTenant)
-                    .where(ConfigurationTenant.tenant_id == context.tenant_id)
-                    .where(ConfigurationTenant.active == True)
-                )
+                stmt = select(AgentInstance).where(AgentInstance.id == context.agent_instance_id)
                 result = await db.execute(stmt)
-                config = result.scalar_one_or_none()
-                
-                if config:
-                    return config.is_qr_payment_enabled()
-                
-                return False
-                
+                agent = result.scalar_one_or_none()
+
+                if not agent or not agent.configuration:
+                    return False
+
+                sales_process = (agent.configuration or {}).get("sales_process") or {}
+                return bool(sales_process.get("QR_payment"))
+
         except Exception as e:
             self.log_error(
                 "failed_to_check_qr_payment",
                 tenant_id=context.tenant_id,
+                agent_instance_id=context.agent_instance_id,
                 error=str(e)
             )
             return False
-    
+
     async def _get_qr_payment_url(self, context: PipelineContext) -> str:
-        """Get QR payment URL from configuration."""
+        """
+        Return a presigned R2 URL (valid 15 min) for the QR code attached to the active agent.
+        Reads agent_instance.configuration.sales_process.QR_code (R2 object key).
+        Falls back to the legacy ConfigurationTenant location for tenants that have not yet
+        re-uploaded their QR via the new per-agent endpoint.
+        """
         try:
             from app.core.database import get_session_factory
-            from app.models import ConfigurationTenant
+            from app.models import AgentInstance, ConfigurationTenant
+            from app.services import r2_storage
             from sqlalchemy import select
-            
+
             session_factory = get_session_factory()
             async with session_factory() as db:
+                if context.agent_instance_id:
+                    agent_stmt = select(AgentInstance).where(
+                        AgentInstance.id == context.agent_instance_id
+                    )
+                    agent_result = await db.execute(agent_stmt)
+                    agent = agent_result.scalar_one_or_none()
+
+                    if agent and agent.configuration:
+                        sales_process = (agent.configuration or {}).get("sales_process") or {}
+                        object_key = sales_process.get("QR_code")
+                        if object_key:
+                            return r2_storage.get_presigned_url(object_key, expires_in=900)
+
+                # Legacy fallback: tenant-level configuration_tenant.products.qr_object_key
                 stmt = (
                     select(ConfigurationTenant)
                     .where(ConfigurationTenant.tenant_id == context.tenant_id)
@@ -225,16 +327,26 @@ class ActionExecutorStage(BasePipelineStage):
                 )
                 result = await db.execute(stmt)
                 config = result.scalar_one_or_none()
-                
-                if config:
-                    return config.get_qr_payment_url()
-                
-                return ""
-                
+
+                if not config:
+                    return ""
+
+                object_key = config.get_qr_object_key()
+                if object_key:
+                    self.log_info(
+                        "qr_legacy_fallback_used",
+                        tenant_id=context.tenant_id,
+                        agent_instance_id=context.agent_instance_id,
+                    )
+                    return r2_storage.get_presigned_url(object_key, expires_in=900)
+
+                return config.get_qr_payment_url()
+
         except Exception as e:
             self.log_error(
                 "failed_to_get_qr_payment_url",
                 tenant_id=context.tenant_id,
+                agent_instance_id=context.agent_instance_id,
                 error=str(e)
             )
             return ""
@@ -294,6 +406,9 @@ class ActionExecutorStage(BasePipelineStage):
                 "qr_url": qr_url
             }
             context.current_state = ConversationState.AWAITING_RECEIPT
+            # QR message already sent via Twilio — response_generator must not send again.
+            context.response_already_sent = True
+            context.response_text = "📲 [QR de pago enviado al cliente]"
             
             self.log_info(
                 "qr_payment_flow_initiated",
@@ -351,7 +466,184 @@ class ActionExecutorStage(BasePipelineStage):
                     return True
         
         return False
-    
+
+    def _get_checkout_requirements(self, context: PipelineContext) -> List[str]:
+        """Return list of required checkout fields from agent config."""
+        reqs = context.agent_config.get("checkout_requirements") if context.agent_config else None
+        if isinstance(reqs, list) and reqs:
+            return reqs
+        return ["Nombre completo", "Dirección de entrega", "NIT"]
+
+    async def _extract_checkout_fields(
+        self,
+        message: str,
+        required_fields: List[str],
+        already_collected: dict,
+    ) -> dict:
+        """Use LLM to extract checkout fields present in the user's message."""
+        missing = [f for f in required_fields if not already_collected.get(f)]
+        if not missing or not message.strip():
+            return {}
+
+        fields_str = ", ".join(f'"{f}"' for f in missing)
+        prompt = (
+            f'Extract from the user\'s message the following information if explicitly provided: {fields_str}.\n'
+            f'Return a JSON object using the exact field names as keys, containing only fields clearly mentioned.\n'
+            f'If a field was not mentioned, omit it.\n\n'
+            f'User message: "{message}"\n\n'
+            f'Return only valid JSON.'
+        )
+
+        try:
+            client = self._get_client()
+            model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                extra_body={"max_completion_tokens": 200},
+                response_format={"type": "json_object"},
+            )
+            result = json.loads(response.choices[0].message.content.strip())
+            return {k: v for k, v in result.items() if k in required_fields and v}
+        except Exception as e:
+            self.log_error("checkout_extraction_failed", error=str(e))
+            return {}
+
+    async def _extract_purchase_items(
+        self,
+        message: str,
+        conversation_history: list,
+        available_products: list,
+    ) -> list:
+        """Use LLM to identify which products (and quantities) the user wants to buy."""
+        if not available_products or not message.strip():
+            return []
+
+        products_str = "\n".join(
+            f'- id={p.get("id")}, name="{p.get("name") or p.get("product_name", "")}", price={p.get("price", 0)}'
+            for p in available_products
+        )
+        history_str = ""
+        if conversation_history:
+            recent = conversation_history[-5:]
+            history_str = "\n".join(
+                f'{"Usuario" if m.get("role") == "user" else "Agente"}: {m.get("content", "")}'
+                for m in recent
+            )
+
+        prompt = (
+            "From the conversation below, identify which products the user wants to purchase and in what quantity.\n"
+            'Return a JSON object with key "items" containing a list of {"id": <product_id>, "quantity": <int>}.\n'
+            "Only include products explicitly chosen by the user. Default quantity to 1 if not stated.\n"
+            'If no specific product is identifiable return {"items": []}.\n\n'
+            f"Available products:\n{products_str}\n\n"
+            + (f"Recent conversation:\n{history_str}\n\n" if history_str else "")
+            + f'Latest user message: "{message}"\n\nReturn only valid JSON.'
+        )
+
+        try:
+            client = self._get_client()
+            model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                extra_body={"max_completion_tokens": 200},
+                response_format={"type": "json_object"},
+            )
+            result = json.loads(response.choices[0].message.content.strip())
+            return result.get("items", [])
+        except Exception as e:
+            self.log_error("purchase_item_extraction_failed", error=str(e))
+            return []
+
+    async def _start_new_purchase_cycle(self, context: PipelineContext) -> None:
+        """Create a new lead and reset the cart for a fresh purchase cycle."""
+        clean_phone = context.sender_phone.replace("whatsapp:", "")
+        customer_name = context.profile_name or (
+            context.lead_info.get("name") if context.lead_info else None
+        )
+        new_lead = Lead(
+            tenant_id=context.tenant_id,
+            agent_instance_id=context.agent_instance_id,
+            phone=clean_phone,
+            name=customer_name,
+            source="whatsapp",
+            status="new",
+            conversation_id=context.conversation_id,
+        )
+        from sqlalchemy import update as sa_update
+        session_factory = get_session_factory()
+        async with session_factory() as db:
+            db.add(new_lead)
+            await db.flush()
+            await db.execute(
+                sa_update(SalesConversation)
+                .where(SalesConversation.id == context.conversation_id)
+                .values(
+                    cart_contents={},
+                    current_state=ConversationState.BROWSING.value,
+                )
+            )
+            await db.commit()
+            await db.refresh(new_lead)
+
+        context.lead_id = new_lead.id
+        context.lead_info = {
+            "id": new_lead.id,
+            "name": new_lead.name,
+            "phone": new_lead.phone,
+            "status": new_lead.status,
+            "score": None,
+        }
+        context.cart_contents = {}
+        context.checkout_data = {}
+        context.current_state = ConversationState.BROWSING
+        self.log_info(
+            "new_purchase_cycle_started",
+            new_lead_id=new_lead.id,
+            conversation_id=context.conversation_id,
+        )
+
+    async def _handle_checkout_collection(self, context: PipelineContext) -> None:
+        """Extract any provided checkout fields and decide next step."""
+        required_fields = self._get_checkout_requirements(context)
+
+        extracted = await self._extract_checkout_fields(
+            context.message_body, required_fields, context.checkout_data
+        )
+        if extracted:
+            context.checkout_data.update(extracted)
+            context.cart_contents["checkout_data"] = context.checkout_data
+            self.log_info("checkout_fields_extracted", fields=list(extracted.keys()))
+
+        missing_fields = [f for f in required_fields if not context.checkout_data.get(f)]
+
+        if missing_fields:
+            context.action_type = "collect_checkout_data"
+            context.action_result = {
+                "action": "collect_checkout_data",
+                "required_fields": required_fields,
+                "missing_fields": missing_fields,
+                "collected": context.checkout_data,
+            }
+        else:
+            # All data collected — proceed with payment
+            qr_enabled = await self._is_qr_payment_enabled(context)
+            if qr_enabled:
+                await self._handle_qr_payment_flow(context)
+            else:
+                lead_id = await self._mark_lead_as_converted(context)
+                await self._notify_supervisor_sale_completed(context)
+                context.current_state = ConversationState.ORDER_COMPLETED
+                context.action_result = {
+                    "lead_id": lead_id,
+                    "action": "sale_completed",
+                    "payment_method": "non_qr",
+                    "notified": True,
+                }
+
     async def _mark_lead_as_converted(self, context: PipelineContext) -> Optional[int]:
         """Mark the lead as converted in the database."""
         
@@ -411,12 +703,13 @@ class ActionExecutorStage(BasePipelineStage):
         
         # Send notification
         try:
+            products = context.cart_contents.get("items") or context.relevant_products
             await NotificationService.notify_sale_completed(
                 supervisor_number=supervisor_number,
                 agent_phone=context.recipient_phone,
                 customer_phone=context.sender_phone,
                 customer_name=customer_name,
-                products=context.relevant_products,
+                products=products,
                 lead_info=context.lead_info,
                 conversation_summary=conversation_summary
             )
@@ -508,86 +801,137 @@ class ActionExecutorStage(BasePipelineStage):
     async def _handle_payment_proof_received(self, context: PipelineContext):
         """
         Handle payment proof submission from customer.
-        
-        This is called when customer sends image/document as payment proof
-        after QR payment request was sent.
-        
-        Actions:
-        1. Mark lead as converted
-        2. Forward payment proof to supervisor with purchase details
+
+        Flow:
+        1. Download file bytes from Twilio (authenticated).
+        2. Archive to private R2 bucket for permanent audit trail.
+        3. Mark lead as converted and save receipt_object_key.
+        4. WhatsApp supervisor notification via presigned R2 URL (valid 15 min,
+           enough for Twilio to fetch it immediately).
+        5. Telegram native upload — supervisor sees the file inline regardless of
+           when they open their phone.
         """
         context.action_type = "payment_proof_received"
-        
-        if not context.media_urls or len(context.media_urls) == 0:
-            self.log_error(
-                "payment_proof_no_media",
-                lead_id=context.lead_id
-            )
-            context.action_result = {
-                "error": "No payment proof found",
-                "action": "payment_proof_invalid"
-            }
+
+        if not context.media_urls:
+            self.log_error("payment_proof_no_media", lead_id=context.lead_id)
+            context.action_result = {"error": "No payment proof found", "action": "payment_proof_invalid"}
             return
-        
+
         try:
-            # Mark lead as converted
+            import mimetypes
+            from datetime import timezone
+            from app.services.media_downloader import download_twilio_media
+            from app.services import r2_storage
+            from app.services import telegram_service
+            from app.core.config import settings
+
+            proof_twilio_url = context.media_urls[0]
+
+            # 1. Download from Twilio
+            file_bytes, content_type = await download_twilio_media(proof_twilio_url)
+
+            # 2. Upload to R2
+            ext = (mimetypes.guess_extension(content_type) or ".bin").lstrip(".")
+            # mimetypes returns .jpe for image/jpeg — normalize
+            if ext == "jpe":
+                ext = "jpeg"
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            object_key = f"receipts/tenant_{context.tenant_id}/lead_{context.lead_id}_{timestamp}.{ext}"
+            await r2_storage.upload_bytes(object_key, file_bytes, content_type)
+
+            self.log_info("receipt_archived_to_r2", object_key=object_key, lead_id=context.lead_id)
+
+            # 3. Mark lead as converted and persist receipt key
             lead_id = await self._mark_lead_as_converted(context)
-            
-            # Get supervisor number
+            await self._save_receipt_object_key(lead_id, object_key)
+
+            # 4. WhatsApp supervisor notification using a short-lived presigned URL
             supervisor_number = context.agent_config.get("integrations", {}).get("supervisor_number")
-            
+            presigned_url = r2_storage.get_presigned_url(object_key, expires_in=900)
+
             if supervisor_number:
                 customer_name = context.profile_name or (
                     context.lead_info.get("name") if context.lead_info else None
                 )
-                proof_url = context.media_urls[0]  # Use first media URL
-                
-                # Forward payment proof to supervisor
+                proof_products = context.cart_contents.get("items") or context.relevant_products
                 await NotificationService.forward_payment_proof_to_supervisor(
                     supervisor_number=supervisor_number,
                     agent_phone=context.recipient_phone,
                     customer_phone=context.sender_phone,
                     customer_name=customer_name,
-                    products=context.relevant_products,
-                    proof_media_url=proof_url,
-                    lead_info=context.lead_info
+                    products=proof_products,
+                    proof_presigned_url=presigned_url,
+                    lead_info=context.lead_info,
                 )
-                
-                context.action_result = {
-                    "lead_id": lead_id,
-                    "action": "payment_proof_forwarded",
-                    "supervisor_notified": True,
-                    "proof_media_count": len(context.media_urls)
+
+            # 5. Telegram native upload — bytes go directly, no expiry problem
+            if settings.telegram_bot_token and settings.telegram_chat_id:
+                # Cart wins; relevant_products is only the inventory match (with stock counts as quantity).
+                products = context.cart_contents.get("items") or context.relevant_products
+                total = sum(
+                    float(p.get("price", 0)) * int(p.get("quantity", 1)) for p in products
+                )
+                sale_data = {
+                    "phone": context.sender_phone,
+                    "items": [
+                        {"name": p.get("name") or p.get("product_name", "Producto"), "quantity": p.get("quantity", 1)}
+                        for p in products
+                    ],
+                    "total_price": f"${total:.2f}",
+                    "checkout_data": context.checkout_data,
+                    "conversation_id": str(context.conversation_id or ""),
                 }
-                context.current_state = ConversationState.ORDER_COMPLETED
-                
-                self.log_info(
-                    "payment_proof_processed",
-                    lead_id=lead_id,
-                    supervisor=supervisor_number,
-                    customer=context.sender_phone
+                await telegram_service.send_payment_approval_request(
+                    chat_id=settings.telegram_chat_id,
+                    sale_data=sale_data,
+                    receipt_bytes=file_bytes,
+                    content_type=content_type,
                 )
-            else:
-                self.log_error(
-                    "no_supervisor_for_payment_proof",
-                    lead_id=lead_id
-                )
-                context.action_result = {
-                    "lead_id": lead_id,
-                    "error": "Supervisor not configured",
-                    "action": "payment_proof_received_but_not_forwarded"
-                }
-                
+
+            # Mark proof as submitted — keep AWAITING_RECEIPT so the Telegram
+            # approve button can still transition to ORDER_COMPLETED.
+            context.cart_contents["payment_proof_submitted"] = True
+            context.action_result = {
+                "lead_id": lead_id,
+                "action": "payment_proof_forwarded",
+                "supervisor_notified": bool(supervisor_number),
+                "receipt_archived": True,
+                "receipt_object_key": object_key,
+                "proof_media_count": len(context.media_urls),
+            }
+
+            self.log_info(
+                "payment_proof_processed",
+                lead_id=lead_id,
+                supervisor=supervisor_number,
+                customer=context.sender_phone,
+            )
+
         except Exception as e:
             self.log_error(
                 "failed_to_process_payment_proof",
                 lead_id=context.lead_id,
-                error=str(e)
+                error=str(e),
             )
-            context.action_result = {
-                "error": str(e),
-                "action": "payment_proof_processing_failed"
-            }
+            context.action_result = {"error": str(e), "action": "payment_proof_processing_failed"}
+
+    async def _save_receipt_object_key(self, lead_id: Optional[int], object_key: str) -> None:
+        """Persist the R2 object key of the archived receipt on the lead record."""
+        if not lead_id:
+            return
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as db:
+                stmt = (
+                    update(Lead)
+                    .where(Lead.id == lead_id)
+                    .values(receipt_object_key=object_key)
+                )
+                await db.execute(stmt)
+                await db.commit()
+        except Exception as e:
+            self.log_error("failed_to_save_receipt_object_key", lead_id=lead_id, error=str(e))
     
     async def _handle_general_question(self, context: PipelineContext):
         """Handle general question."""

@@ -246,6 +246,12 @@ class PipelineRunner:
         if context.error:
             return "respond", "Pipeline error detected, skipping tool use."
 
+        # Once the action stage has produced a result, the pipeline work is done.
+        # Routing back to "use_tool" would re-run the action executor and duplicate
+        # side-effects (e.g. sending the QR code twice).
+        if context.action_result is not None:
+            return "respond", "Action already executed."
+
         system_prompt, user_prompt = self._build_reasoning_prompts(context)
         required_missing = self._missing_required_context(context)
 

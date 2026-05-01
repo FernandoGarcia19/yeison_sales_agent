@@ -18,6 +18,8 @@ from app.core.redis_client import (
     release_lock,
     build_batch_queue_key,
     build_batch_lock_key,
+    set_msg_dedup,
+    is_msg_duplicate,
 )
 from app.core.config import settings
 
@@ -93,16 +95,18 @@ async def enqueue_message(
     """
     if not settings.batch_enabled:
         return False
-    
+
+    # Primary dedup guard: persists beyond the queue lifetime, catches Twilio retries
+    # that arrive after the batch queue has already been deleted and processed.
+    if await is_msg_duplicate(message_sid):
+        logger.warning(f"Duplicate message {message_sid} ignored (dedup key hit)")
+        return False
+
+    # Mark as accepted immediately so concurrent retries are also rejected.
+    await set_msg_dedup(message_sid, ttl=300)
+
     queue_key = build_batch_queue_key(agent_phone, user_phone)
     lock_key = build_batch_lock_key(agent_phone, user_phone)
-    
-    # Check for duplicate message_sid in queue
-    existing_messages = await list_range(queue_key)
-    for msg_data in existing_messages:
-        if msg_data.get("message_sid") == message_sid:
-            logger.warning(f"Duplicate message {message_sid} ignored")
-            return False
     
     # Create batch message
     batch_msg = BatchMessage(

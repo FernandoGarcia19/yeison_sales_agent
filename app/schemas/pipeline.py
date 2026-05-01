@@ -107,6 +107,11 @@ class PipelineContext(BaseModel):
     # Response generation
     response_text: Optional[str] = Field(None, description="Generated response")
     response_media_url: Optional[str] = Field(None, description="Media URL for response")
+    response_already_sent: bool = Field(
+        default=False,
+        description="True when the action stage already sent the WhatsApp message (e.g. QR). "
+                    "Response generator will skip the send but still persist to DB."
+    )
     
     # Metadata
     started_at: datetime = Field(default_factory=datetime.utcnow, description="Pipeline start time")

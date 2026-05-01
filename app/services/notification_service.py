@@ -113,23 +113,23 @@ class NotificationService:
         if products:
             message_parts.append("🛒 *Productos:*")
             total = 0.0
-            
+
             for i, product in enumerate(products, 1):
-                product_name = product.get("product_name", "Producto")
-                price = product.get("price", 0)
+                product_name = product.get("name") or product.get("product_name", "Producto")
+                price = float(product.get("price", 0))
                 quantity = product.get("quantity", 1)
-                subtotal = float(price) * quantity
+                subtotal = price * quantity
                 total += subtotal
-                
+
                 message_parts.append(
                     f"{i}. {product_name}\n"
                     f"   💰 ${price:.2f} x {quantity} = ${subtotal:.2f}"
                 )
-            
+
             message_parts.append("")
             message_parts.append(f"💵 *TOTAL: ${total:.2f}*")
             message_parts.append("")
-        
+
         # Additional context
         if conversation_summary:
             message_parts.append("💬 *Resumen de conversación:*")
@@ -354,30 +354,20 @@ class NotificationService:
         customer_phone: str,
         customer_name: Optional[str],
         products: List[Dict[str, Any]],
-        proof_media_url: str,
+        proof_presigned_url: str,
         lead_info: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Forward payment proof from customer to supervisor.
-        
-        Args:
-            supervisor_number: Supervisor's WhatsApp number
-            agent_phone: Agent's phone number
-            customer_phone: Customer's phone number
-            customer_name: Customer's name if available
-            products: List of purchased products
-            proof_media_url: URL of payment proof (image/document)
-            lead_info: Optional lead information
-            
-        Returns:
-            True if notification was sent successfully
+        Forward payment proof from customer to supervisor via WhatsApp.
+        proof_presigned_url is a 15-minute presigned R2 URL — Twilio fetches
+        it immediately, so expiry is not a concern here.
         """
         
         logger.info(
             "forwarding_payment_proof",
             supervisor=supervisor_number,
             customer=customer_phone,
-            proof_url=proof_media_url
+            proof_url=proof_presigned_url
         )
         
         # Build predefined message for supervisor
@@ -403,23 +393,23 @@ class NotificationService:
         if products:
             message_parts.append("🛒 *Productos:*")
             total = 0.0
-            
+
             for i, product in enumerate(products, 1):
-                product_name = product.get("product_name", "Producto")
-                price = product.get("price", 0)
+                product_name = product.get("name") or product.get("product_name", "Producto")
+                price = float(product.get("price", 0))
                 quantity = product.get("quantity", 1)
-                subtotal = float(price) * quantity
+                subtotal = price * quantity
                 total += subtotal
-                
+
                 message_parts.append(
                     f"{i}. {product_name}\n"
                     f"   💰 ${price:.2f} x {quantity} = ${subtotal:.2f}"
                 )
-            
+
             message_parts.append("")
             message_parts.append(f"💵 *TOTAL: ${total:.2f}*")
             message_parts.append("")
-        
+
         # Proof info
         message_parts.append("📎 *Comprobante de pago:* Ver archivo adjunto")
         message_parts.append("")
@@ -435,7 +425,7 @@ class NotificationService:
                 to=supervisor_number,
                 body=message,
                 from_number=agent_phone,
-                media_url=proof_media_url
+                media_url=proof_presigned_url
             )
             
             logger.info(

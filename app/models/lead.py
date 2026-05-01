@@ -51,7 +51,14 @@ class Lead(Base, TimestampMixin, ActiveMixin):
     lead_metadata: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)
     last_contact: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     converted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    
+    receipt_object_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    conversation_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("sales_conversation.id"),
+        nullable=True,
+        index=True
+    )
+
     # Relationships
     tenant: Mapped["Tenant"] = relationship(
         "Tenant",
@@ -61,10 +68,10 @@ class Lead(Base, TimestampMixin, ActiveMixin):
         "AgentInstance",
         back_populates="leads"
     )
-    conversations: Mapped[List["SalesConversation"]] = relationship(
+    conversation: Mapped[Optional["SalesConversation"]] = relationship(
         "SalesConversation",
-        back_populates="lead",
-        foreign_keys="SalesConversation.lead_id"
+        foreign_keys=[conversation_id],
+        back_populates="leads"
     )
     
     def __repr__(self) -> str:

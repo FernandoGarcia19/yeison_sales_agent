@@ -12,6 +12,7 @@ from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.runner import PipelineRunner
 from app.services.batch_manager import enqueue_message
 from app.integrations.whatsapp.validator import validate_twilio_signature
+from app.core.redis_client import is_msg_duplicate, set_msg_dedup
 from app.core.config import settings
 
 logger = structlog.get_logger()
@@ -121,6 +122,18 @@ async def receive_twilio_webhook(
         # For production, uncomment the line below:
         # raise HTTPException(status_code=403, detail="Signature validation failed")
     
+    # Dedup guard for non-batched path and the batch fallback path.
+    # (The batched path has its own check in enqueue_message, but we guard
+    # here too so the fallback branch is also protected.)
+    if not settings.batch_enabled:
+        if await is_msg_duplicate(webhook_data.MessageSid):
+            logger.warning(
+                "duplicate_message_ignored",
+                message_sid=webhook_data.MessageSid,
+            )
+            return Response(content="<Response></Response>", status_code=200, media_type="application/xml")
+        await set_msg_dedup(webhook_data.MessageSid, ttl=300)
+
     # Queue message for batch processing or process immediately
     if settings.batch_enabled:
         # Enqueue to batch queue

@@ -48,32 +48,44 @@ class ResponseGeneratorStage(BasePipelineStage):
             action_type=context.action_type
         )
         
+        if context.response_already_sent:
+            # The action stage already sent the WhatsApp message (e.g. QR payment request).
+            # Skip the send to avoid a duplicate, but still persist to the DB so the
+            # conversation history has a record of what the agent did.
+            self.log_info(
+                "response_already_sent_by_action_stage",
+                action_type=context.action_type,
+                response_text=context.response_text,
+            )
+            await self._save_messages_to_conversation(context)
+            return context
+
         # Generate response based on intent and action
         response_text = await self._generate_response(context)
         context.response_text = response_text
-        
+
         # Send response via WhatsApp using the agent's phone number (multitenant)
         try:
             message_sid = await send_whatsapp_message(
                 to=context.sender_phone,
                 body=response_text,
-                from_number=context.recipient_phone  # Use agent's phone number for response
+                from_number=context.recipient_phone
             )
-            
+
             # Store message_sid in action_result
             if not context.action_result:
                 context.action_result = {}
             context.action_result["message_sid"] = message_sid
-            
+
             self.log_info(
                 "response_sent",
                 message_sid=message_sid,
                 to=context.sender_phone
             )
-            
+
             # Save message to conversation history
             await self._save_messages_to_conversation(context)
-        
+
         except Exception as e:
             self.log_error(
                 "failed_to_send_response",

@@ -21,11 +21,12 @@ async def get_tenant_inventory(tenant_id: int, query: str) -> List[Dict[str, Any
     async with session_factory() as db:
         # In a real scenario we'd use similarity search. For now, simple ILIKE matching
         search_pattern = f"%{query}%"
+        from sqlalchemy import or_
         stmt = select(InventoryTenant).where(
             InventoryTenant.tenant_id == tenant_id,
             InventoryTenant.active == True,
-            InventoryTenant.quantity > 0,
-            (InventoryTenant.product_name.ilike(search_pattern) | 
+            or_(InventoryTenant.quantity > 0, InventoryTenant.quantity.is_(None)),
+            (InventoryTenant.product_name.ilike(search_pattern) |
              InventoryTenant.description.ilike(search_pattern))
         ).limit(5)
         

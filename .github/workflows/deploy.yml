@@ -1,0 +1,39 @@
+
+name: Deploy to Hostinger VPS
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.VPS_IP }}
+          username: ${{ secrets.VPS_USER }} # usually 'root' or 'ubuntu'
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            # Determine which environment to update based on the branch
+            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+              PROJECT_DIR="/var/www/production"
+            elif [ "${{ github.ref }}" = "refs/heads/staging" ]; then
+              PROJECT_DIR="/var/www/staging"
+            fi
+
+            echo "Deploying to $PROJECT_DIR"
+
+            # Navigate to the specific microservice folder
+            cd $PROJECT_DIR/yeison_sales_agent
+
+            # Pull latest changes
+            git pull origin ${{ github.ref_name }}
+
+            # Navigate back to the docker-compose root
+            cd $PROJECT_DIR
+
+            docker-compose up -d --build yeison_app

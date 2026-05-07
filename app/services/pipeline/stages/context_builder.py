@@ -463,10 +463,11 @@ class ContextBuilderStage(BasePipelineStage):
         For now, just return active products.
         """
         
+        from sqlalchemy import or_
         stmt = select(InventoryTenant).where(
             InventoryTenant.tenant_id == tenant_id,
             InventoryTenant.active == True,
-            InventoryTenant.quantity > 0
+            or_(InventoryTenant.quantity > 0, InventoryTenant.quantity.is_(None))
         ).limit(5)
         
         result = await db.execute(stmt)

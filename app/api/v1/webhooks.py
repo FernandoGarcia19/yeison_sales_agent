@@ -12,6 +12,7 @@ from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.runner import PipelineRunner
 from app.services.batch_manager import enqueue_message
 from app.integrations.whatsapp.validator import validate_twilio_signature
+from app.core.redis_client import is_msg_duplicate, set_msg_dedup
 from app.core.config import settings
 
 logger = structlog.get_logger()
@@ -40,7 +41,7 @@ async def receive_twilio_webhook(
     AccountSid: str = Form(...),
     From: str = Form(...),
     To: str = Form(...),
-    Body: str = Form(...),
+    Body: str = Form(default=""),
     NumMedia: str = Form(default="0"),
     ProfileName: str = Form(default=None),
     WaId: str = Form(default=None),
@@ -49,6 +50,14 @@ async def receive_twilio_webhook(
     Longitude: str = Form(default=None),
     MediaUrl0: str = Form(default=None),
     MediaContentType0: str = Form(default=None),
+    MediaUrl1: str = Form(default=None),
+    MediaContentType1: str = Form(default=None),
+    MediaUrl2: str = Form(default=None),
+    MediaContentType2: str = Form(default=None),
+    MediaUrl3: str = Form(default=None),
+    MediaContentType3: str = Form(default=None),
+    MediaUrl4: str = Form(default=None),
+    MediaContentType4: str = Form(default=None),
 ):
     """
     Receive WhatsApp messages from Twilio webhook.
@@ -113,6 +122,18 @@ async def receive_twilio_webhook(
         # For production, uncomment the line below:
         # raise HTTPException(status_code=403, detail="Signature validation failed")
     
+    # Dedup guard for non-batched path and the batch fallback path.
+    # (The batched path has its own check in enqueue_message, but we guard
+    # here too so the fallback branch is also protected.)
+    if not settings.batch_enabled:
+        if await is_msg_duplicate(webhook_data.MessageSid):
+            logger.warning(
+                "duplicate_message_ignored",
+                message_sid=webhook_data.MessageSid,
+            )
+            return Response(content="<Response></Response>", status_code=200, media_type="application/xml")
+        await set_msg_dedup(webhook_data.MessageSid, ttl=300)
+
     # Queue message for batch processing or process immediately
     if settings.batch_enabled:
         # Enqueue to batch queue
@@ -149,9 +170,9 @@ async def receive_twilio_webhook(
     
     # Return immediate response to Twilio (must respond within 15 seconds)
     return Response(
-        content="",
+        content="<Response></Response>",
         status_code=200,
-        media_type="text/plain"
+        media_type="application/xml"
     )
 
 

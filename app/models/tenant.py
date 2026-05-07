@@ -43,6 +43,12 @@ class Tenant(Base, TimestampMixin, ActiveMixin):
         back_populates="tenant",
         lazy="selectin"
     )
+    configuration: Mapped[Optional["ConfigurationTenant"]] = relationship(
+        "ConfigurationTenant",
+        back_populates="tenant",
+        lazy="selectin",
+        uselist=False
+    )
     
     def __repr__(self) -> str:
         return f"<Tenant(id={self.id}, name={self.name}, email={self.email})>"

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.base import BasePipelineStage, IdentificationError
-from app.models import AgentInstance, Tenant, SalesConversation
+from app.models import AgentInstance, Tenant, SalesConversation, Lead
 from app.core.database import get_session_factory
 from app.core.redis_client import (
     cache_get,
@@ -89,15 +89,42 @@ class IdentificationStage(BasePipelineStage):
                     agent_type=agent.agent_type
                 )
         
-        # Find or create conversation
+        # Find or create conversation then lead (conversation first so lead can
+        # reference its conversation_id).
         session_factory = get_session_factory()
         async with session_factory() as db:
             conversation = await self._find_or_create_conversation(
                 db,
                 context.agent_instance_id,
-                context.sender_phone
+                context.sender_phone,
             )
+            lead = await self._find_or_create_lead(
+                db,
+                context.tenant_id,
+                context.agent_instance_id,
+                context.sender_phone,
+                context.profile_name,
+                existing_conversation=conversation,
+            )
+            # Backfill conversation_id on the lead if not set (e.g. first message)
+            if not lead.conversation_id:
+                lead.conversation_id = conversation.id
+            await db.commit()
+            await db.refresh(conversation)
+            context.lead_id = lead.id
+            context.lead_info = {
+                "id": lead.id,
+                "name": lead.name,
+                "email": lead.email,
+                "phone": lead.phone,
+                "status": lead.status,
+                "score": lead.score,
+            }
             context.conversation_id = conversation.id
+            context.current_state = conversation.current_state
+            context.cart_contents = conversation.cart_contents or {}
+            context.checkout_data = context.cart_contents.get("checkout_data", {})
+            context.fulfillment_type = conversation.fulfillment_type
         
         self.log_info(
             "identification_completed",
@@ -126,46 +153,70 @@ class IdentificationStage(BasePipelineStage):
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
     
+    async def _find_or_create_lead(
+        self,
+        db: AsyncSession,
+        tenant_id: int,
+        agent_instance_id: int,
+        sender_phone: str,
+        profile_name: str | None,
+        existing_conversation: SalesConversation | None = None,
+    ) -> Lead:
+        """
+        Return the current lead for this conversation.
+        For an existing conversation, finds the most recently created lead whose
+        conversation_id matches — avoids reusing a converted lead from a prior cycle.
+        A new lead is created only when the conversation has no associated lead yet.
+        """
+        if existing_conversation:
+            stmt = (
+                select(Lead)
+                .where(Lead.conversation_id == existing_conversation.id, Lead.active == True)
+                .order_by(Lead.id.desc())
+                .limit(1)
+            )
+            result = await db.execute(stmt)
+            lead = result.scalar_one_or_none()
+            if lead:
+                return lead
+
+        clean_phone = sender_phone.replace("whatsapp:", "")
+        lead = Lead(
+            tenant_id=tenant_id,
+            agent_instance_id=agent_instance_id,
+            phone=clean_phone,
+            name=profile_name,
+            source="whatsapp",
+            status="new",
+        )
+        db.add(lead)
+        await db.flush()
+        self.log_info("lead_created", lead_id=lead.id, phone=clean_phone)
+        return lead
+
     async def _find_or_create_conversation(
         self,
         db: AsyncSession,
         agent_instance_id: int,
-        sender_phone: str
+        sender_phone: str,
     ) -> SalesConversation:
-        """
-        Find existing conversation or create new one.
-        
-        For now, we use a simple approach: one conversation per agent+sender pair.
-        In future, you might want to create new conversations after timeout or explicit reset.
-        """
-        
-        
-        external_user_id = sender_phone
-        
+        """Find existing conversation or create new one (lead linking happens in process)."""
         stmt = select(SalesConversation).where(
             SalesConversation.agent_instance_id == agent_instance_id,
-            SalesConversation.external_user_id == external_user_id,
+            SalesConversation.external_user_id == sender_phone,
             SalesConversation.active == True
         )
-        
         result = await db.execute(stmt)
         conversation = result.scalar_one_or_none()
-        
+
         if not conversation:
-            # Create new conversation
             conversation = SalesConversation(
                 agent_instance_id=agent_instance_id,
-                external_user_id=external_user_id,
-                messages=[]
+                external_user_id=sender_phone,
+                messages=[],
             )
             db.add(conversation)
-            await db.commit()
-            await db.refresh(conversation)
-            
-            self.log_info(
-                "conversation_created",
-                conversation_id=conversation.id,
-                agent_instance_id=agent_instance_id
-            )
-        
+            await db.flush()
+            self.log_info("conversation_created", agent_instance_id=agent_instance_id)
+
         return conversation

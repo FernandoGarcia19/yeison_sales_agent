@@ -35,6 +35,15 @@ class PipelineStage(str, Enum):
     RESPONSE_GENERATION = "response_generation"
 
 
+class ConversationState(str, Enum):
+    BROWSING = "browsing"
+    CART_BUILDING = "cart_building"
+    FULFILLMENT_COORD = "fulfillment_coord"
+    AWAITING_RECEIPT = "awaiting_receipt"
+    ORDER_COMPLETED = "order_completed"
+    PAUSED = "paused"
+
+
 class PipelineContext(BaseModel):
     """
     Context data that flows through the pipeline stages.
@@ -64,6 +73,12 @@ class PipelineContext(BaseModel):
     conversation_id: Optional[int] = Field(None, description="Conversation ID")
     lead_id: Optional[int] = Field(None, description="Lead ID if exists")
     
+    # State Machine tracking
+    current_state: Optional[ConversationState] = Field(None, description="Current conversation state")
+    cart_contents: Dict[str, Any] = Field(default_factory=dict, description="Current cart items")
+    checkout_data: Dict[str, Any] = Field(default_factory=dict, description="Current checkout structured data")
+    fulfillment_type: Optional[str] = Field(None, description="Delivery or pickup")
+    
     # Classification stage results
     intent: Optional[IntentType] = Field(None, description="Classified intent")
     intent_confidence: Optional[float] = Field(None, description="Intent confidence score")
@@ -78,6 +93,12 @@ class PipelineContext(BaseModel):
         description="Relevant inventory items"
     )
     lead_info: Optional[Dict[str, Any]] = Field(None, description="Lead information")
+
+    # Agentic reasoning
+    agent_scratchpad: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Reasoning history for the current turn"
+    )
     
     # Action execution results
     action_type: Optional[str] = Field(None, description="Action that was executed")
@@ -86,6 +107,11 @@ class PipelineContext(BaseModel):
     # Response generation
     response_text: Optional[str] = Field(None, description="Generated response")
     response_media_url: Optional[str] = Field(None, description="Media URL for response")
+    response_already_sent: bool = Field(
+        default=False,
+        description="True when the action stage already sent the WhatsApp message (e.g. QR). "
+                    "Response generator will skip the send but still persist to DB."
+    )
     
     # Metadata
     started_at: datetime = Field(default_factory=datetime.utcnow, description="Pipeline start time")

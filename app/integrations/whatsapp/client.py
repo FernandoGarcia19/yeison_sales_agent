@@ -33,18 +33,24 @@ def get_twilio_client() -> Client:
 async def send_whatsapp_message(
     to: str,
     body: str,
+    from_number: str,
     media_url: Optional[str] = None
 ) -> str:
     """
     Send WhatsApp message via Twilio.
     
     Args:
-        to: Recipient phone number (E.164 format)
+        to: Recipient phone number (E.164 format, e.g., +584129876543)
         body: Message content
+        from_number: Sender phone number (agent's WhatsApp number in E.164 format)
         media_url: Optional media URL
     
     Returns:
         Message SID
+    
+    Note:
+        For multitenant support, from_number must be the agent_instance.phone_number
+        associated with the tenant handling this conversation.
     """
     
     client = get_twilio_client()
@@ -53,7 +59,6 @@ async def send_whatsapp_message(
     if not to.startswith("whatsapp:"):
         to = f"whatsapp:{to}"
     
-    from_number = settings.twilio_phone_number
     if not from_number.startswith("whatsapp:"):
         from_number = f"whatsapp:{from_number}"
     
@@ -70,6 +75,7 @@ async def send_whatsapp_message(
             "whatsapp_message_sent",
             message_sid=message.sid,
             to=to,
+            from_=from_number,
             status=message.status
         )
         

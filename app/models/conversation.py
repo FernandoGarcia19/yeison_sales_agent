@@ -2,14 +2,26 @@
 SalesConversation model - represents an ongoing conversation with a customer.
 """
 
-from typing import TYPE_CHECKING, List, Dict, Any
+import enum
+from typing import TYPE_CHECKING, List, Dict, Any, Optional
 from sqlalchemy import String, BigInteger, ForeignKey, JSON
+from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, ActiveMixin
 
 if TYPE_CHECKING:
     from app.models.agent_instance import AgentInstance
+    from app.models.lead import Lead
+
+
+class ConversationState(str, enum.Enum):
+    BROWSING = "browsing"
+    CART_BUILDING = "cart_building"
+    FULFILLMENT_COORD = "fulfillment_coord"
+    AWAITING_RECEIPT = "awaiting_receipt"
+    ORDER_COMPLETED = "order_completed"
+    PAUSED = "paused"
 
 
 class SalesConversation(Base, TimestampMixin, ActiveMixin):
@@ -19,8 +31,7 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
     Messages are stored as JSONB in the 'messages' field for flexibility.
     Each message contains: role, content, timestamp, intent, etc.
     
-    The external_user_id represents the WhatsApp user (could be lead_id
-    or a unique identifier for the customer).
+    The external_user_id is the customer's WhatsApp phone number (E.164).
     """
     
     __tablename__ = "sales_conversation"
@@ -32,21 +43,42 @@ class SalesConversation(Base, TimestampMixin, ActiveMixin):
         nullable=False,
         index=True
     )
-    external_user_id: Mapped[int] = mapped_column(
-        String(15),
+    external_user_id: Mapped[str] = mapped_column(
+        String(20),
         nullable=False,
-        comment="WhatsApp user identifier or lead_id"
+        index=True,
+        comment="WhatsApp phone number in E.164 format"
     )
     messages: Mapped[List[Dict[str, Any]]] = mapped_column(
         JSON,
         nullable=False,
         default=list
     )
+    current_state: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default=ConversationState.BROWSING.value
+    )
+    cart_contents: Mapped[Dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict
+    )
+    fulfillment_type: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="pickup, delivery, or null"
+    )
     
     # Relationships
     agent_instance: Mapped["AgentInstance"] = relationship(
         "AgentInstance",
         back_populates="conversations"
+    )
+    leads: Mapped[List["Lead"]] = relationship(
+        "Lead",
+        back_populates="conversation",
+        foreign_keys="Lead.conversation_id"
     )
     
     def __repr__(self) -> str:

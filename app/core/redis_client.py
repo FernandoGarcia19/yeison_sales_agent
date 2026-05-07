@@ -271,3 +271,24 @@ def build_batch_queue_key(agent_phone: str, user_phone: str) -> str:
 def build_batch_lock_key(agent_phone: str, user_phone: str) -> str:
     """Build cache key for batch processing lock."""
     return f"batch_lock:{agent_phone}:{user_phone}"
+
+
+def build_msg_dedup_key(message_sid: str) -> str:
+    """
+    Build a dedup key for a Twilio message SID.
+    This key persists beyond the batch queue lifetime so Twilio retries
+    (which arrive after the queue is deleted) are still rejected.
+    """
+    return f"dedup_msg:{message_sid}"
+
+
+async def set_msg_dedup(message_sid: str, ttl: int = 300) -> None:
+    """Mark a message SID as seen. TTL default is 5 minutes."""
+    redis = get_redis_client()
+    await redis.set(build_msg_dedup_key(message_sid), "1", ex=ttl)
+
+
+async def is_msg_duplicate(message_sid: str) -> bool:
+    """Return True if this message SID was already accepted for processing."""
+    redis = get_redis_client()
+    return await redis.exists(build_msg_dedup_key(message_sid)) > 0

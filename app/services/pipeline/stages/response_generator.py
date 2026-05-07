@@ -48,31 +48,44 @@ class ResponseGeneratorStage(BasePipelineStage):
             action_type=context.action_type
         )
         
+        if context.response_already_sent:
+            # The action stage already sent the WhatsApp message (e.g. QR payment request).
+            # Skip the send to avoid a duplicate, but still persist to the DB so the
+            # conversation history has a record of what the agent did.
+            self.log_info(
+                "response_already_sent_by_action_stage",
+                action_type=context.action_type,
+                response_text=context.response_text,
+            )
+            await self._save_messages_to_conversation(context)
+            return context
+
         # Generate response based on intent and action
         response_text = await self._generate_response(context)
         context.response_text = response_text
-        
-        # Send response via WhatsApp
+
+        # Send response via WhatsApp using the agent's phone number (multitenant)
         try:
             message_sid = await send_whatsapp_message(
                 to=context.sender_phone,
-                body=response_text
+                body=response_text,
+                from_number=context.recipient_phone
             )
-            
+
             # Store message_sid in action_result
             if not context.action_result:
                 context.action_result = {}
             context.action_result["message_sid"] = message_sid
-            
+
             self.log_info(
                 "response_sent",
                 message_sid=message_sid,
                 to=context.sender_phone
             )
-            
+
             # Save message to conversation history
             await self._save_messages_to_conversation(context)
-        
+
         except Exception as e:
             self.log_error(
                 "failed_to_send_response",
@@ -122,7 +135,7 @@ class ResponseGeneratorStage(BasePipelineStage):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=settings.openai_temperature,
-            max_tokens=settings.openai_max_tokens
+            extra_body={"max_completion_tokens": settings.openai_max_tokens}
         )
         
         response_text = response.choices[0].message.content.strip()
@@ -151,18 +164,34 @@ class ResponseGeneratorStage(BasePipelineStage):
         description = tenant_info.get("description", "")
         contact_info = tenant_info.get("contact_info", {})
         
+        # Log what we're using for the prompt
+        self.log_info(
+            "building_system_prompt",
+            agent_config_keys=list(agent_config.keys()),
+            tenant_info_keys=list(tenant_info.keys()),
+            company_name=company_name,
+            industry=industry,
+            has_description=bool(description),
+            has_contact=bool(contact_info),
+            has_product_info=bool(agent_config.get("product_info")),
+            has_operations_info=bool(agent_config.get("operations_info"))
+        )
+        
+        # CRITICAL: Log if we're using defaults
+        if company_name == "nuestra empresa":
+            self.log_error(
+                "using_default_company_name",
+                tenant_info=tenant_info,
+                full_agent_config_keys=list(agent_config.keys())
+            )
+        
         personality = agent_config.get("personality", {})
         tone = personality.get("tone", "friendly")
-        formality = personality.get("formality_level", "casual")
+        formality = personality.get("formality_level")
         emoji_usage = personality.get("emoji_usage", "moderate")
         response_length = personality.get("response_length", "concise")
         brand_voice = personality.get("brand_voice", "")
         custom_phrases = personality.get("custom_phrases", {})
-        
-        sales_process = agent_config.get("sales_process", {})
-        upsell_enabled = sales_process.get("upsell_enabled", True)
-        discount_authority = sales_process.get("discount_authority", False)
-        max_discount = sales_process.get("max_discount_percent", 0)
         
         response_settings = agent_config.get("response_settings", {})
         include_pricing = response_settings.get("include_pricing", True)
@@ -191,19 +220,70 @@ class ResponseGeneratorStage(BasePipelineStage):
             "formal": "formal y respetuoso"
         }.get(tone, "amigable")
         
+        # Get additional business context from new config structure
+        product_info = agent_config.get("product_info", {})
+        operations_info = agent_config.get("operations_info", {})
+        
         system_prompt = f"""Eres {agent_name}, un asistente virtual de ventas para {company_name}.
 
 INFORMACIÓN DE LA EMPRESA:
 - Nombre: {company_name}
 - Industria: {industry}
 - Descripción: {description if description else 'Empresa dedicada a ' + industry}
+- Ubicación: {tenant_info.get('location', 'N/A')}
+- Sitio web: {tenant_info.get('website', 'N/A')}
 """
         
-        if contact_info:
-            system_prompt += f"""- Teléfono: {contact_info.get('phone', 'N/A')}
-- Email: {contact_info.get('email', 'N/A')}
-- Dirección: {contact_info.get('address', 'N/A')}
-- Sitio web: {contact_info.get('website', 'N/A')}
+        if contact_info and any(contact_info.values()):
+            system_prompt += f"""
+INFORMACIÓN DE CONTACTO:"""
+            if contact_info.get('name'):
+                system_prompt += f"\n- Contacto: {contact_info.get('name')}"
+                if contact_info.get('role'):
+                    system_prompt += f" ({contact_info.get('role')})"
+            if contact_info.get('phone'):
+                system_prompt += f"\n- Teléfono: {contact_info.get('phone')}"
+            system_prompt += "\n"
+        
+        # Add product information if available
+        if product_info:
+            if product_info.get('unique_selling_points'):
+                system_prompt += f"""
+PROPUESTAS DE VALOR:
+{product_info['unique_selling_points']}
+"""
+            if product_info.get('target_audience'):
+                system_prompt += f"""
+AUDIENCIA OBJETIVO:
+{product_info['target_audience']}
+"""
+            if product_info.get('payment_methods'):
+                system_prompt += f"""
+MÉTODOS DE PAGO:
+{product_info['payment_methods']}
+"""
+        
+        # Add operations information if available
+        if operations_info:
+            if operations_info.get('sales_process'):
+                system_prompt += f"""
+PROCESO DE VENTAS:
+{operations_info['sales_process']}
+"""
+            if operations_info.get('common_questions'):
+                system_prompt += f"""
+PREGUNTAS FRECUENTES:
+{operations_info['common_questions']}
+"""
+            if operations_info.get('objections'):
+                system_prompt += f"""
+MANEJO DE OBJECIONES:
+{operations_info['objections']}
+"""
+            if operations_info.get('closing_techniques'):
+                system_prompt += f"""
+TÉCNICAS DE CIERRE:
+{operations_info['closing_techniques']}
 """
         
         if brand_voice:
@@ -237,11 +317,10 @@ PERSONALIDAD Y ESTILO:
 
 CAPACIDADES:
 - Responder preguntas sobre productos y servicios
-- Proporcionar información de precios {"y ofrecer descuentos hasta " + str(max_discount) + "%" if discount_authority else ""}
+- Proporcionar información de precios
 - Verificar disponibilidad de productos
 - Ayudar con el proceso de compra
 - Proporcionar información sobre {company_name} (nombre, ubicación, contacto, etc.)
-{"- Sugerir productos complementarios o mejores opciones" if upsell_enabled else ""}
 
 INSTRUCCIONES IMPORTANTES:
 1. Si te preguntan sobre la empresa, el negocio, o información de contacto, SIEMPRE usa la información proporcionada arriba
@@ -318,6 +397,10 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         """
         Generate fallback template-based response when AI fails.
         """
+        
+        # Handle payment proof received specially
+        if context.action_type == "payment_proof_received":
+            return self._payment_proof_response(context)
         
         # Simple template-based responses (placeholder)
         if context.intent == IntentType.GREETING:
@@ -396,7 +479,37 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
     
     def _purchase_intent_response(self, context: PipelineContext) -> str:
         """Generate purchase intent response."""
+        
+        # Check if QR payment was initiated
+        if context.action_result:
+            action = context.action_result.get("action", "")
+            
+            if action == "awaiting_payment_proof":
+                # QR was sent, ask customer to scan
+                return "✅ Te acabo de enviar el código QR. Por favor escanéalo con tu billetera digital para completar el pago."
+            elif action == "sale_completed":
+                # Non-QR payment, sale is complete
+                return "¡Excelente! Tu compra ha sido confirmada. Nuestro equipo se pondrá en contacto contigo pronto."
+            elif action == "qr_payment_failed":
+                # QR failed, provide alternative
+                return "Disculpa, tuvimos un problema al enviar el QR. Por favor intenta de nuevo o contacta con nuestro equipo."
+            elif action == "qualify_lead":
+                # Not ready yet
+                return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Cuál plan te interesa? (Plan Estándar $100/mes o Plan Premium $200/mes)"
+        
+        # Default response
         return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Qué producto te gustaría adquirir?"
+    
+    def _payment_proof_response(self, context: PipelineContext) -> str:
+        """Generate response when payment proof is received."""
+        
+        if context.action_result:
+            if context.action_result.get("supervisor_notified"):
+                return "✅ ¡Perfecto! Recibimos tu comprobante de pago. Nuestro equipo está revisando tu solicitud y se pondrá en contacto contigo pronto. ¡Gracias por tu compra! 🎉"
+            else:
+                return "⚠️ Recibimos tu comprobante, pero hubo un problema al notificar a nuestro equipo. Por favor contacta con nosotros directamente."
+        
+        return "✅ ¡Gracias! Recibimos tu comprobante. Estamos procesando tu solicitud."
     
     async def _save_messages_to_conversation(self, context: PipelineContext):
         """Save incoming and outgoing messages to conversation history."""
@@ -450,8 +563,15 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
                     action_type=context.action_type
                 )
                 
-                # Mark the messages field as modified so SQLAlchemy detects the change
+                # Update state machine fields
+                if context.current_state is not None:
+                    conversation.current_state = context.current_state
+                conversation.cart_contents = context.cart_contents
+                conversation.fulfillment_type = context.fulfillment_type
+                
+                # Mark the fields as modified so SQLAlchemy detects the change
                 attributes.flag_modified(conversation, "messages")
+                attributes.flag_modified(conversation, "cart_contents")
                 
                 await db.commit()
                 

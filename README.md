@@ -1,23 +1,40 @@
 # yeison_sales_agent
-# WhatsApp AI Sales Agent - Architecture Documentation
+# WhatsApp AI Sales Agent - Multitenant Architecture
 
 ## Project Overview
 
-This is a WhatsApp AI Sales Agent that processes incoming WhatsApp messages through Twilio webhooks and executes a multi-step workflow to handle sales conversations.
+This is a **multitenant WhatsApp AI Sales Agent** that processes incoming WhatsApp messages through Twilio webhooks and executes a multi-step workflow to handle sales conversations for multiple businesses simultaneously.
 
 **Key Principle**: This service focuses on **workflow execution only**. All CRUD operations for Tenant, Agent, Inventory, and Lead are handled by a separate main backend system.
+
+**Multitenant**: Each business (tenant) has its own WhatsApp number, configuration, inventory, and conversations. Data is completely isolated between tenants.
 
 ## Architecture
 
 ### High-Level Flow
 
 ```
-WhatsApp → Twilio → Webhook → Batch Queue (Redis) → Pipeline → WhatsApp Response
-                                  ↓                      ↓
-                              Wait 3s for              Database (read)
-                              more messages            Redis (cache)
-                                                       Main Backend API (mutations)
+WhatsApp → Twilio → Webhook → Tenant Identification → Batch Queue (Redis) → Pipeline → WhatsApp Response
+                         ↓              ↓                      ↓                  ↓
+                    Agent Phone    Tenant Context        Wait 3s for        Database (read)
+                    Lookup         Configuration         more messages      Redis (cache)
+                                                                             Main Backend API (mutations)
 ```
+
+### Multitenant Flow
+
+When a message arrives:
+
+1. **Phone Number Received**: Twilio webhook receives `From` (customer) and `To` (business WhatsApp number)
+2. **Tenant Identification**: System looks up which tenant owns the `To` number via `agent_instance` table
+3. **Context Loading**: Load tenant-specific configuration, inventory, and conversation history
+4. **Processing**: Pipeline processes with tenant context
+5. **Response**: Send response from the correct business WhatsApp number
+
+**Example**:
+- Customer sends to `+591766990995` (Zapatería El Paso) → System uses Tenant ID 1's inventory and config
+- Customer sends to `+591777123456` (Tech Store) → System uses Tenant ID 2's inventory and config
+- Conversations are completely isolated between tenants
 
 ### Message Batching
 
@@ -37,14 +54,16 @@ The system implements intelligent message batching to handle rapid-fire messages
 
 ### Pipeline Stages
 
-The agent processes each message through 6 sequential stages:
+The agent processes each message through a dynamically orchestrated pipeline, powered by a ReAct (Reasoning and Acting) graph, rather than rigid sequential steps. 
 
 1. **Validation** - Validates message format and content
 2. **Identification** - Identifies tenant, agent instance, and conversation
-3. **Classification** - Classifies user intent using AI/LLM
-4. **Context Building** - Builds conversation context with history and data
-5. **Action Execution** - Executes appropriate actions based on intent
-6. **Response Generation** - Generates and sends response via WhatsApp
+3. **ReasoningNode / Context Building** - Replaces the old rigid "Classification/Context" stages. Uses a LangGraph-based `ReasoningNode` that evaluates the user's input and intelligently invokes Langchain tools *on-demand* to fetch exactly what it needs:
+   - `get_tenant_inventory`: Queries PostgreSQL for product pricing and availability.
+   - `get_tenant_policies`: Retrieves business hours, delivery rules, and sales processes.
+   - `get_lead_info`: Checks for prior lead history or score.
+4. **Action Execution** - Executes any final CRM mutations or system actions based on the ReasoningNode's finalized intent.
+5. **Response Generation** - The LLM synthesizes the tool outputs and conversation history into a natural WhatsApp response.
 
 ## Project Structure
 
@@ -94,17 +113,50 @@ yeison_sales_agent/
 
 This service reads from an existing PostgreSQL database with the following tables:
 
-- **tenant** - Customer/organization information
-- **agent_instance** - AI agent configurations (phone_number, configuration JSON)
+### Core Tables
+
+- **tenant** - Business/organization information
+  - `id`, `name`, `email`, `profile_image`, `active`
+  
+- **agent_instance** - AI agent configurations per tenant
+  - `id`, `tenant_id`, `phone_number` (WhatsApp number), `agent_type`, `configuration` (JSONB)
+  - Unique constraint on `(phone_number, active)` ensures one number = one active agent
+  
+- **sales_conversation** - Conversation state and message history
+  - `id`, `agent_instance_id`, `external_user_id` (customer phone), `lead_id`, `messages` (JSONB)
+  - Unique constraint on `(agent_instance_id, external_user_id, active)` prevents duplicate conversations
+  
+- **lead** - Sales leads/prospects per tenant
+  - `id`, `agent_instance_id`, `tenant_id`, `name`, `email`, `phone`, `status`, `metadata` (JSONB)
+  
 - **inventory_tenant** - Product catalog per tenant
-- **lead** - Sales leads/prospects
-- **sales_conversation** - Conversation state and message history (JSONB)
+  - `id`, `tenant_id`, `product_name`, `price`, `quantity`, `description`
+
+### Data Isolation
+
+All queries **MUST** filter by `tenant_id` to ensure proper multitenant isolation:
+
+```python
+# ✅ CORRECT - Tenant-scoped query
+products = await db.execute(
+    select(InventoryTenant).where(
+        InventoryTenant.tenant_id == context.tenant_id,
+        InventoryTenant.active == True
+    )
+)
+
+# ❌ WRONG - Missing tenant_id filter
+products = await db.execute(
+    select(InventoryTenant).where(InventoryTenant.active == True)
+)
+```
 
 ### Data Access Pattern
 
-- **READ**: Direct database queries for tenant, agent, inventory, lead data
+- **READ**: Direct database queries for tenant, agent, inventory, lead data (always filtered by `tenant_id`)
 - **WRITE**: Only to `sales_conversation` table for conversation state
 - **MUTATIONS**: Via REST API calls to main backend (creating/updating leads, analytics)
+- **CACHING**: Redis cache with tenant-scoped keys (`tenant:{tenant_id}:{resource}`)
 
 ## Key Components
 
@@ -143,17 +195,14 @@ This service reads from an existing PostgreSQL database with the following table
 - Finds or creates conversation
 - Uses Redis caching for performance
 
-#### Classification Stage
-- Classifies user intent using AI/LLM
-- Currently uses simple keyword matching (placeholder)
-- **TODO**: Implement OpenAI/Anthropic integration
-
-#### Context Builder Stage
-- Loads conversation history
-- Queries relevant inventory items
-- Loads lead information if exists
-- Prepares data for AI response generation
-- **Batching**: Combines multiple message bodies with newlines for unified context
+#### Classification & Context Building (Now Handled by ReAct / ReasoningNode)
+- **Replaced**: The rigid classification and massive up-front context loading pipeline has been replaced by a sophisticated LangGraph-based `ReasoningNode`.
+- **On-Demand Tool Binding**: Instead of querying PostgreSQL up-front for everything (inventory, tenant config, lead info), the `ReasoningNode` uses LLM tool-calling natively (`llm.bind_tools()`) to fetch data exactly when needed.
+- **Available Tools**:
+  - `get_tenant_inventory`: Queries DB for availability.
+  - `get_tenant_policies`: Retrieves specific rules and schedules.
+  - `get_lead_info`: Checks DB for existing external user records.
+- **Dynamic Context**: Combines multiple message bodies (if batched) and actively reasons about the best next steps, significantly reducing token usage and unnecessary database loads.
 
 #### Action Executor Stage
 - Routes to appropriate action based on intent
@@ -321,6 +370,41 @@ ngrok http 8000
 - `GET /health` - Health check
 - `GET /api/v1/webhooks/twilio` - Webhook verification
 - `POST /api/v1/webhooks/twilio` - Receive WhatsApp messages
+
+## 📱 Notificaciones al Supervisor
+
+El sistema incluye notificaciones automáticas al supervisor/encargado cuando ocurren eventos importantes. Ver [NOTIFICACIONES.md](NOTIFICACIONES.md) para documentación completa.
+
+### Eventos que Generan Notificaciones
+
+1. **Venta Completada** 🎉
+   - Se envía cuando el cliente confirma una compra
+   - Incluye detalles del cliente, productos y total
+   - El lead se marca automáticamente como "converted"
+
+2. **Solicitud de Atención Humana** 🚨
+   - Se envía cuando el cliente pide hablar con un humano
+   - Incluye contexto de la conversación
+   - Notificación inmediata para respuesta rápida
+
+### Configuración Rápida
+
+```bash
+# Ver agentes disponibles
+python update_supervisor_config.py --list
+
+# Configurar número de supervisor
+python update_supervisor_config.py --agent-id 3 --supervisor-number +59177123456
+
+# Verificar configuración
+python update_supervisor_config.py --agent-id 3 --show
+```
+
+### Formato del Número
+
+- Debe estar en formato E.164: `+[código país][número]`
+- Ejemplo Bolivia: `+59177123456`
+- Ejemplo Venezuela: `+584121234567`
 
 ## Security
 

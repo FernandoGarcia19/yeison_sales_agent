@@ -1,0 +1,38 @@
+DB SCHEMA CHANGES — yeison_sales_agent
+=======================================
+Apply these directly against yeison_db (no Alembic).
+
+----------------------------------------------------------------------
+1. Add conversation_id to lead table
+----------------------------------------------------------------------
+ALTER TABLE public.lead
+    ADD COLUMN conversation_id BIGINT REFERENCES public.sales_conversation(id);
+
+CREATE INDEX idx_lead_conversation_id ON public.lead(conversation_id);
+
+----------------------------------------------------------------------
+2. Remove lead_id from sales_conversation (circular FK eliminated)
+----------------------------------------------------------------------
+ALTER TABLE public.sales_conversation DROP COLUMN IF EXISTS lead_id;
+
+DROP INDEX IF EXISTS public.sales_conversation_lead_id_index;
+
+----------------------------------------------------------------------
+3. Backfill conversation_id for existing lead rows
+----------------------------------------------------------------------
+-- Only useful if lead_id still exists at the time of migration.
+-- Run BEFORE step 2.
+UPDATE public.lead l
+SET    conversation_id = sc.id
+FROM   public.sales_conversation sc
+WHERE  sc.lead_id = l.id
+  AND  l.conversation_id IS NULL;
+
+----------------------------------------------------------------------
+Why these changes exist
+----------------------------------------------------------------------
+A SalesConversation owns MULTIPLE leads — one per "purchase cycle".
+The relationship is now a simple one-way FK: lead.conversation_id → sales_conversation.id.
+The old circular dependency (sales_conversation.lead_id ↔ lead.conversations) is gone.
+The "current lead" for a conversation is always the most recently created lead
+with that conversation_id (ORDER BY id DESC LIMIT 1).

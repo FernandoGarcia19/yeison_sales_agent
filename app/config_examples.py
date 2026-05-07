@@ -1,9 +1,18 @@
 """
 Example agent configuration for reference.
 
-This shows the complete structure that can be stored in the 
-agent_instance.configuration JSONB field.
+This shows the NEW SPLIT structure:
+- Agent-specific configuration stored in agent_instance.configuration
+- Business-level configuration stored in configuration_tenant table
+
+After the schema migration, agent_instance.configuration only stores
+agent-specific settings (personality, sales process, integrations).
+Business information is now stored in configuration_tenant.
 """
+
+# =============================================================================
+# AGENT-SPECIFIC CONFIGURATION (agent_instance.configuration JSONB field)
+# =============================================================================
 
 EXAMPLE_AGENT_CONFIG = {
     # Basic agent information
@@ -15,20 +24,7 @@ EXAMPLE_AGENT_CONFIG = {
     
     # Integration settings
     "integrations": {
-        "whatsapp_number": "591766990995"
-    },
-    
-    # Tenant/business information
-    "tenant_info": {
-        "company_name": "Zapatería El Paso",
-        "industry": "Calzado y Accesorios",
-        "description": "Venta de zapatos premium y accesorios de cuero",
-        "contact_info": {
-            "phone": "591-77123456",
-            "email": "ventas@elpaso.com",
-            "address": "Av. Arce 2345, La Paz, Bolivia",
-            "website": "www.zapaterialpaso.com"
-        }
+        "supervisor_number": "591766990995"  # WhatsApp number for human handoff
     },
     
     # Personality and communication style
@@ -47,57 +43,145 @@ EXAMPLE_AGENT_CONFIG = {
         }
     },
     
-    # Sales process configuration
+    # Sales process configuration (payment-related settings)
     "sales_process": {
-        "qualification_questions": [
-            "¿Qué tipo de calzado estás buscando?",
-            "¿Es para uso casual o formal?",
-            "¿Tienes alguna preferencia de marca o estilo?"
-        ],
-        "product_presentation_style": "benefits_focused",  # features_focused, benefits_focused, story_based
-        "pricing_strategy": "transparent",                 # transparent, negotiable, tiered
-        "upsell_enabled": True,
-        "cross_sell_enabled": True,
-        "discount_authority": True,
-        "max_discount_percent": 10
+        "QR_payment": True,           # Accept QR code payments
+        "physical_payment": True,     # Accept physical/cash payments
+        "physic_payment": True,       # Legacy field
+        "QR_image": ""                # URL/path to QR payment image
     },
     
-    # Lead management and follow-up
-    "lead_management": {
-        "auto_create_leads": True,
-        "auto_follow_up": True,
-        "follow_up_schedule": [1, 3, 7],  # Days after last interaction
-        "follow_up_messages": [
-            {
-                "day": 1,
-                "message": "Hola {name}, ¿ya decidiste sobre los zapatos que te mostré ayer? ¿Tienes alguna pregunta?"
-            },
-            {
-                "day": 3,
-                "message": "Hola {name}, solo quería recordarte que tenemos esos modelos disponibles en tu talla. ¿Te interesa hacer el pedido?"
-            },
-            {
-                "day": 7,
-                "message": "Hola {name}, esta semana tenemos una promoción especial en calzado deportivo. ¿Te gustaría conocer más?"
-            }
-        ],
-        "qualification_score_threshold": 75,
-        "hot_lead_actions": [
-            "notify_sales_team",
-            "priority_response"
-        ],
-        "lead_scoring_rules": {
-            "product_inquiry": 10,
-            "pricing_question": 15,
-            "availability_check": 20,
-            "purchase_intent": 40,
-            "objection_handled": 5
-        }
-    },
+    # Lead management (managed elsewhere - kept empty)
+    "lead_management": {},
+    
+    # Product catalog (managed through separate table - kept empty)
+    "product_catalog": {},
     
     # Response behavior settings
     "response_settings": {
         "max_response_length": 500,
+        "include_product_images": True,
+        "include_pricing": True,
+        "show_availability": True,
+        "response_delay_seconds": 0,           # Simulate typing delay
+        "typing_indicator_duration": 2         # Show typing indicator for N seconds
+    },
+    
+    # Conversation management
+    "conversation_settings": {
+        "context_messages_limit": 10,
+        "session_timeout_minutes": 30,
+        "handoff_to_human_keywords": [
+            "hablar con persona",
+            "agente humano",
+            "representante",
+            "gerente"
+        ],
+        "auto_handoff_enabled": False
+    }
+}
+
+
+# =============================================================================
+# TENANT/BUSINESS CONFIGURATION (configuration_tenant table JSONB fields)
+# =============================================================================
+
+EXAMPLE_TENANT_CONFIG = {
+    # Business JSONB field
+    "business": {
+        "company_name": "Zapatería El Paso",
+        "industry": "Calzado y Accesorios",
+        "company_size": "pequeña",               # pequeña, mediana, grande, enterprise
+        "website": "www.zapaterialpaso.com",
+        "location": "La Paz, Bolivia",
+        "year_founded": "2003",
+        "description": "Venta de zapatos premium y accesorios de cuero"
+    },
+    
+    # Contact JSONB field
+    "contact": {
+        "contact_name": "María Gonzales",
+        "contact_role": "Gerente de Ventas",
+        "contact_phone": "591-77123456"
+    },
+    
+    # Products JSONB field
+    "products": {
+        "unique_selling_points": "Calidad premium, diseños exclusivos, garantía de satisfacción, atención personalizada",
+        "target_audience": "Profesionales de 25-45 años que buscan calzado de calidad para uso diario y ocasiones especiales",
+        "payment_methods": "Efectivo, transferencia bancaria, tarjetas de crédito/débito, QR (pago móvil)",
+        "qr_payment_enabled": True,
+        "qr_payment_url": "https://example.com/qr_code.png"
+    },
+    
+    # Operations JSONB field
+    "operations": {
+        "sales_process": "Consulta inicial → Identificación de necesidades → Presentación de opciones → Prueba (si es presencial) → Cierre de venta → Seguimiento post-venta",
+        "common_questions": "¿Tienen mi talla? ¿Hacen envíos? ¿Cuál es la garantía? ¿Aceptan devoluciones? ¿Tienen catálogo actualizado?",
+        "objections": "Precio alto: Destacar calidad y durabilidad. No es mi talla: Ofrecer pedido especial. Prefiero ver en persona: Invitar a la tienda o enviar fotos detalladas.",
+        "closing_techniques": "Crear urgencia (stock limitado), ofrecer promoción del día, facilitar proceso de compra, garantía de satisfacción",
+        "business_hours": {
+            "enabled": True,
+            "timezone": "America/La_Paz",
+            "schedule": {
+                "monday": {"open": "09:00", "close": "19:00"},
+                "tuesday": {"open": "09:00", "close": "19:00"},
+                "wednesday": {"open": "09:00", "close": "19:00"},
+                "thursday": {"open": "09:00", "close": "19:00"},
+                "friday": {"open": "09:00", "close": "19:00"},
+                "saturday": {"open": "10:00", "close": "18:00"},
+                "sunday": {"open": None, "close": None}
+            },
+            "after_hours_message": "Gracias por contactarnos. Nuestro horario de atención es de lunes a viernes de 9:00 a 19:00 y sábados de 10:00 a 18:00. Te responderemos en cuanto abramos. 🕐"
+        },
+        "response_time": "Inmediato (automatizado 24/7)",
+        "languages": "Español",
+        "competitors": "Zapatería Central, Calzados Miranda, importadoras online",
+        "additional_context": "Somos una empresa familiar con más de 20 años en el mercado. Priorizamos la calidad sobre el volumen de ventas."
+    }
+}
+
+
+# =============================================================================
+# MINIMAL CONFIGURATION EXAMPLES
+# =============================================================================
+
+MINIMAL_AGENT_CONFIG = {
+    "agent_info": {
+        "name": "Asistente de Ventas",
+        "version": "1.0.0",
+        "type": "sales"
+    },
+    "personality": {
+        "tone": "friendly",
+        "language": "es"
+    },
+    "integrations": {
+        "supervisor_number": "591766990995"
+    },
+    "sales_process": {
+        "QR_payment": False,
+        "physical_payment": True
+    },
+    "lead_management": {},
+    "product_catalog": {}
+}
+
+MINIMAL_TENANT_CONFIG = {
+    "business": {
+        "company_name": "Mi Tienda",
+        "industry": "Retail",
+        "description": "Venta de productos diversos"
+    },
+    "contact": {
+        "contact_phone": "591-77123456"
+    }
+}
+
+
+# =============================================================================
+# SQL USAGE EXAMPLES
+# =============================================================================
         "include_product_images": True,
         "include_pricing": True,
         "show_availability": True,
@@ -136,40 +220,82 @@ EXAMPLE_AGENT_CONFIG = {
 }
 
 
-# Minimal configuration example (all other fields will use defaults)
-MINIMAL_CONFIG = {
-    "tenant_info": {
-        "company_name": "Mi Tienda",
-        "industry": "Retail"
-    },
-    "integrations": {
-        "whatsapp_number": "591766990995"
-    }
-}
-
+# =============================================================================
+# SQL USAGE EXAMPLES
+# =============================================================================
 
 # How to use in SQL:
 """
--- Create an agent instance with full configuration
+-- 1. Create an agent instance with agent-specific configuration
 INSERT INTO agent_instance (tenant_id, phone_number, agent_type, configuration, active)
 VALUES (
     1,
     '+14155238886',
     'sales',
-    '{"agent_info": {"name": "Yeison", "version": "1.0.0"}, "tenant_info": {"company_name": "Zapatería El Paso", "industry": "Calzado"}}'::jsonb,
+    '{
+        "agent_info": {"name": "Yeison", "version": "1.0.0", "type": "sales"},
+        "personality": {"tone": "friendly", "language": "es"},
+        "integrations": {"whatsapp_number": "591766990995"}
+    }'::jsonb,
     true
 );
 
--- Update just the personality settings
+-- 2. Create tenant business configuration
+INSERT INTO configuration_tenant (tenant_id, business, contact, products, operations, active, is_completed)
+VALUES (
+    1,
+    '{
+        "company_name": "Zapatería El Paso",
+        "industry": "Calzado y Accesorios",
+        "description": "Venta de zapatos premium"
+    }'::jsonb,
+    '{
+        "contact_name": "María Gonzales",
+        "contact_email": "ventas@elpaso.com",
+        "contact_phone": "591-77123456"
+    }'::jsonb,
+    '{
+        "unique_selling_points": "Calidad premium, diseños exclusivos",
+        "target_audience": "Profesionales 25-45 años",
+        "payment_methods": "Efectivo, tarjetas, QR"
+    }'::jsonb,
+    '{
+        "sales_process": "Consulta → Presentación → Cierre",
+        "common_questions": "¿Tienen mi talla? ¿Hacen envíos?",
+        "business_hours": {"enabled": true, "timezone": "America/La_Paz"}
+    }'::jsonb,
+    true,
+    true
+);
+
+-- 3. Update just the personality settings in agent config
 UPDATE agent_instance
 SET configuration = configuration || '{"personality": {"tone": "professional", "formality_level": "formal"}}'::jsonb
 WHERE id = 1;
 
--- Query agents with specific personality tone
+-- 4. Update business information in tenant config
+UPDATE configuration_tenant
+SET business = business || '{"company_size": "mediana", "year_founded": "2003"}'::jsonb
+WHERE tenant_id = 1;
+
+-- 5. Query agents with specific personality tone
 SELECT * FROM agent_instance
 WHERE configuration->'personality'->>'tone' = 'friendly';
 
--- Get all agents with auto follow-up enabled
-SELECT * FROM agent_instance
-WHERE (configuration->'lead_management'->>'auto_follow_up')::boolean = true;
+-- 6. Get tenant with complete configuration
+SELECT 
+    t.id,
+    t.name,
+    ct.business->>'company_name' as company,
+    ct.contact->>'contact_email' as email,
+    ct.is_completed
+FROM tenant t
+LEFT JOIN configuration_tenant ct ON t.id = ct.tenant_id
+WHERE ct.active = true;
+
+-- 7. Find tenants missing business configuration
+SELECT t.id, t.name, t.email
+FROM tenant t
+LEFT JOIN configuration_tenant ct ON t.id = ct.tenant_id
+WHERE ct.id IS NULL OR ct.is_completed = false;
 """

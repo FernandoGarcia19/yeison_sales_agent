@@ -18,6 +18,8 @@ from app.core.redis_client import (
     release_lock,
     build_batch_queue_key,
     build_batch_lock_key,
+    set_msg_dedup,
+    is_msg_duplicate,
 )
 from app.core.config import settings
 
@@ -65,6 +67,8 @@ class BatchMessage:
 
 # Global registry of active batch timers
 _active_timers: Dict[str, asyncio.Task] = {}
+# Strong references for background tasks to prevent them from being garbage collected
+_background_tasks = set()
 
 
 async def enqueue_message(
@@ -91,16 +95,18 @@ async def enqueue_message(
     """
     if not settings.batch_enabled:
         return False
-    
+
+    # Primary dedup guard: persists beyond the queue lifetime, catches Twilio retries
+    # that arrive after the batch queue has already been deleted and processed.
+    if await is_msg_duplicate(message_sid):
+        logger.warning(f"Duplicate message {message_sid} ignored (dedup key hit)")
+        return False
+
+    # Mark as accepted immediately so concurrent retries are also rejected.
+    await set_msg_dedup(message_sid, ttl=300)
+
     queue_key = build_batch_queue_key(agent_phone, user_phone)
     lock_key = build_batch_lock_key(agent_phone, user_phone)
-    
-    # Check for duplicate message_sid in queue
-    existing_messages = await list_range(queue_key)
-    for msg_data in existing_messages:
-        if msg_data.get("message_sid") == message_sid:
-            logger.warning(f"Duplicate message {message_sid} ignored")
-            return False
     
     # Create batch message
     batch_msg = BatchMessage(
@@ -124,7 +130,9 @@ async def enqueue_message(
             _active_timers[timer_id].cancel()
             del _active_timers[timer_id]
         # Process immediately
-        asyncio.create_task(_process_batch(agent_phone, user_phone))
+        task = asyncio.create_task(_process_batch(agent_phone, user_phone))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
         return True
     
     # Start batch timer if not already running
@@ -142,6 +150,9 @@ async def enqueue_message(
     timer_task = asyncio.create_task(
         _batch_timer(agent_phone, user_phone)
     )
+    _background_tasks.add(timer_task)
+    timer_task.add_done_callback(_background_tasks.discard)
+    
     _active_timers[timer_id] = timer_task
     
     logger.info(f"Started batch timer for {queue_key} ({settings.batch_window_seconds}s)")
@@ -230,17 +241,11 @@ async def _process_batch(agent_phone: str, user_phone: str):
         
         if result.success:
             logger.info(
-                f"Batch processed successfully",
-                message_sid=result.message_sid,
-                intent=result.intent,
-                action=result.action_executed,
-                response_sent=result.response_sent
+                f"Batch processed successfully (message_sid={result.message_sid}, intent={result.intent}, action={result.action_executed}, response_sent={result.response_sent})"
             )
         else:
             logger.error(
-                f"Batch processing failed",
-                message_sid=result.message_sid,
-                error=result.error
+                f"Batch processing failed (message_sid={result.message_sid}, error={result.error})"
             )
     
     except Exception as e:

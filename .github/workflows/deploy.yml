@@ -36,4 +36,4 @@ jobs:
             # Navigate back to the docker-compose root
             cd $PROJECT_DIR
 
-            docker-compose up -d --build yeison_app
+            docker compose up -d --build yeison_app

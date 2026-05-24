@@ -42,9 +42,16 @@ async def send_payment_approval_request(
     conversation_id = sale_data.get("conversation_id", "0")
 
     checkout_str = "\n".join(f"    • {k}: {v}" for k, v in checkout_data.items()) or "    • N/A"
-    items_str = "\n".join(
-        f"    • {item.get('name', 'Item')} x{item.get('quantity', 1)}" for item in items
-    ) or "    • N/A"
+    def _fmt_item(item: dict) -> str:
+        name = item.get("name", "Item")
+        qty = int(item.get("quantity", 1))
+        unit_price = float(item.get("price", 0))
+        subtotal = unit_price * qty
+        if unit_price:
+            return f"    • {name} x{qty} @ ${unit_price:.2f} = <b>${subtotal:.2f}</b>"
+        return f"    • {name} x{qty}"
+
+    items_str = "\n".join(_fmt_item(item) for item in items) or "    • N/A"
 
     caption = (
         f"🚨 <b>NUEVA SOLICITUD DE APROBACIÓN DE PAGO</b> 🚨\n\n"

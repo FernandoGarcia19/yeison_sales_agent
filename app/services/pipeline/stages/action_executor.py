@@ -865,8 +865,11 @@ class ActionExecutorStage(BasePipelineStage):
                     lead_info=context.lead_info,
                 )
 
-            # 5. Telegram native upload — bytes go directly, no expiry problem
-            if settings.telegram_bot_token and settings.telegram_chat_id:
+            # 5. Telegram native upload — bytes go directly, no expiry problem.
+            # supervisor_chat_id is per-agent (stored in agent_configuration.integrations.telegram).
+            tg_config = (context.agent_config.get("integrations") or {}).get("telegram") or {}
+            tg_chat_id = tg_config.get("supervisor_chat_id")
+            if settings.telegram_bot_token and tg_config.get("enabled") and tg_chat_id:
                 # Cart wins; relevant_products is only the inventory match (with stock counts as quantity).
                 products = context.cart_contents.get("items") or context.relevant_products
                 total = sum(
@@ -875,7 +878,11 @@ class ActionExecutorStage(BasePipelineStage):
                 sale_data = {
                     "phone": context.sender_phone,
                     "items": [
-                        {"name": p.get("name") or p.get("product_name", "Producto"), "quantity": p.get("quantity", 1)}
+                        {
+                            "name": p.get("name") or p.get("product_name", "Producto"),
+                            "quantity": p.get("quantity", 1),
+                            "price": float(p.get("price", 0)),
+                        }
                         for p in products
                     ],
                     "total_price": f"${total:.2f}",
@@ -883,7 +890,7 @@ class ActionExecutorStage(BasePipelineStage):
                     "conversation_id": str(context.conversation_id or ""),
                 }
                 await telegram_service.send_payment_approval_request(
-                    chat_id=settings.telegram_chat_id,
+                    chat_id=tg_chat_id,
                     sale_data=sale_data,
                     receipt_bytes=file_bytes,
                     content_type=content_type,

@@ -48,7 +48,9 @@ class Settings(BaseSettings):
     
     # Telegram settings
     telegram_bot_token: Optional[str] = None
-    telegram_chat_id: Optional[str] = None
+    # telegram_webhook_secret: optional — when set, inbound callbacks must carry
+    # X-Telegram-Bot-Api-Secret-Token matching this value.
+    telegram_webhook_secret: Optional[str] = None
 
     # Cloudflare R2 Storage
     r2_endpoint_url: str = ""
@@ -59,6 +61,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 # Global settings instance
 settings = Settings()

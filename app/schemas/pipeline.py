@@ -39,6 +39,7 @@ class ConversationState(str, Enum):
     BROWSING = "browsing"
     CART_BUILDING = "cart_building"
     FULFILLMENT_COORD = "fulfillment_coord"
+    AWAITING_PAYMENT_METHOD = "awaiting_payment_method"
     AWAITING_RECEIPT = "awaiting_receipt"
     ORDER_COMPLETED = "order_completed"
     PAUSED = "paused"

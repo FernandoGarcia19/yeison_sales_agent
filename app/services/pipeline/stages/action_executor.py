@@ -54,6 +54,11 @@ class ActionExecutorStage(BasePipelineStage):
             action_type=context.action_type
         )
 
+        # If the customer is choosing between payment methods, intercept before normal routing.
+        if context.current_state == ConversationState.AWAITING_PAYMENT_METHOD:
+            await self._handle_payment_method_selection(context)
+            return context
+
         # If waiting for payment proof, only allow payment_proof_received through
         if context.current_state == ConversationState.AWAITING_RECEIPT:
             if context.action_type != "payment_proof_received":
@@ -202,21 +207,19 @@ class ActionExecutorStage(BasePipelineStage):
             }
             return
 
-        # Purchase is confirmed and checkout complete — check payment method
-        qr_payment_enabled = await self._is_qr_payment_enabled(context)
+        # Purchase is confirmed and checkout complete — check available payment methods
+        payment_methods = await self._get_payment_methods_enabled(context)
+        qr_enabled = payment_methods["qr"]
+        physical_enabled = payment_methods["physical"]
 
-        if qr_payment_enabled:
+        if qr_enabled and physical_enabled:
+            context.current_state = ConversationState.AWAITING_PAYMENT_METHOD
+            context.action_type = "awaiting_payment_method_selection"
+            context.action_result = {"action": "awaiting_payment_method_selection"}
+        elif qr_enabled:
             await self._handle_qr_payment_flow(context)
         else:
-            lead_id = await self._mark_lead_as_converted(context)
-            await self._notify_supervisor_sale_completed(context)
-            context.current_state = ConversationState.ORDER_COMPLETED
-            context.action_result = {
-                "lead_id": lead_id,
-                "action": "sale_completed",
-                "payment_method": "non_qr",
-                "notified": True,
-            }
+            await self._handle_physical_payment_flow(context)
     
     async def _is_purchase_confirmed(self, context: PipelineContext) -> bool:
         """
@@ -290,6 +293,38 @@ class ActionExecutorStage(BasePipelineStage):
                 error=str(e)
             )
             return False
+
+    async def _get_payment_methods_enabled(self, context: PipelineContext) -> dict:
+        """Return which payment methods are enabled for the active agent."""
+        try:
+            from app.models import AgentInstance
+
+            if not context.agent_instance_id:
+                return {"qr": False, "physical": True}
+
+            session_factory = get_session_factory()
+            async with session_factory() as db:
+                stmt = select(AgentInstance).where(AgentInstance.id == context.agent_instance_id)
+                result = await db.execute(stmt)
+                agent = result.scalar_one_or_none()
+
+                if not agent or not agent.configuration:
+                    return {"qr": False, "physical": True}
+
+                sales_process = (agent.configuration or {}).get("sales_process") or {}
+                return {
+                    "qr": bool(sales_process.get("QR_payment")),
+                    "physical": bool(sales_process.get("physical_payment")),
+                }
+
+        except Exception as e:
+            self.log_error(
+                "failed_to_get_payment_methods",
+                tenant_id=context.tenant_id,
+                agent_instance_id=context.agent_instance_id,
+                error=str(e),
+            )
+            return {"qr": False, "physical": True}
 
     async def _get_qr_payment_url(self, context: PipelineContext) -> str:
         """
@@ -629,20 +664,19 @@ class ActionExecutorStage(BasePipelineStage):
                 "collected": context.checkout_data,
             }
         else:
-            # All data collected — proceed with payment
-            qr_enabled = await self._is_qr_payment_enabled(context)
-            if qr_enabled:
+            # All data collected — check available payment methods
+            payment_methods = await self._get_payment_methods_enabled(context)
+            qr_enabled = payment_methods["qr"]
+            physical_enabled = payment_methods["physical"]
+
+            if qr_enabled and physical_enabled:
+                context.current_state = ConversationState.AWAITING_PAYMENT_METHOD
+                context.action_type = "awaiting_payment_method_selection"
+                context.action_result = {"action": "awaiting_payment_method_selection"}
+            elif qr_enabled:
                 await self._handle_qr_payment_flow(context)
             else:
-                lead_id = await self._mark_lead_as_converted(context)
-                await self._notify_supervisor_sale_completed(context)
-                context.current_state = ConversationState.ORDER_COMPLETED
-                context.action_result = {
-                    "lead_id": lead_id,
-                    "action": "sale_completed",
-                    "payment_method": "non_qr",
-                    "notified": True,
-                }
+                await self._handle_physical_payment_flow(context)
 
     async def _mark_lead_as_converted(self, context: PipelineContext) -> Optional[int]:
         """Mark the lead as converted in the database."""
@@ -865,8 +899,11 @@ class ActionExecutorStage(BasePipelineStage):
                     lead_info=context.lead_info,
                 )
 
-            # 5. Telegram native upload — bytes go directly, no expiry problem
-            if settings.telegram_bot_token and settings.telegram_chat_id:
+            # 5. Telegram native upload — bytes go directly, no expiry problem.
+            # supervisor_chat_id is per-agent (stored in agent_configuration.integrations.telegram).
+            tg_config = (context.agent_config.get("integrations") or {}).get("telegram") or {}
+            tg_chat_id = tg_config.get("supervisor_chat_id")
+            if settings.telegram_bot_token and tg_config.get("enabled") and tg_chat_id:
                 # Cart wins; relevant_products is only the inventory match (with stock counts as quantity).
                 products = context.cart_contents.get("items") or context.relevant_products
                 total = sum(
@@ -875,7 +912,11 @@ class ActionExecutorStage(BasePipelineStage):
                 sale_data = {
                     "phone": context.sender_phone,
                     "items": [
-                        {"name": p.get("name") or p.get("product_name", "Producto"), "quantity": p.get("quantity", 1)}
+                        {
+                            "name": p.get("name") or p.get("product_name", "Producto"),
+                            "quantity": p.get("quantity", 1),
+                            "price": float(p.get("price", 0)),
+                        }
                         for p in products
                     ],
                     "total_price": f"${total:.2f}",
@@ -883,7 +924,7 @@ class ActionExecutorStage(BasePipelineStage):
                     "conversation_id": str(context.conversation_id or ""),
                 }
                 await telegram_service.send_payment_approval_request(
-                    chat_id=settings.telegram_chat_id,
+                    chat_id=tg_chat_id,
                     sale_data=sale_data,
                     receipt_bytes=file_bytes,
                     content_type=content_type,
@@ -937,3 +978,96 @@ class ActionExecutorStage(BasePipelineStage):
         """Handle general question."""
         context.action_type = "general_question"
         context.action_result = {}
+
+    async def _handle_payment_method_selection(self, context: PipelineContext):
+        """
+        Called when current_state == AWAITING_PAYMENT_METHOD.
+        Detect whether the customer chose QR or physical from their reply
+        and route to the appropriate payment flow.
+        """
+        message_lower = context.message_body.lower()
+
+        qr_keywords = ["qr", "código qr", "codigo qr", "digital", "billetera", "escaner", "transferencia", "qr code"]
+        physical_keywords = [
+            "físico", "fisico", "efectivo", "presencial", "en persona",
+            "contra entrega", "cash", "en efectivo", "pago físico", "pago fisico",
+        ]
+
+        chose_qr = any(kw in message_lower for kw in qr_keywords)
+        chose_physical = any(kw in message_lower for kw in physical_keywords)
+
+        if chose_qr and not chose_physical:
+            self.log_info("payment_method_selected", method="qr", customer=context.sender_phone)
+            await self._handle_qr_payment_flow(context)
+        elif chose_physical and not chose_qr:
+            self.log_info("payment_method_selected", method="physical", customer=context.sender_phone)
+            await self._handle_physical_payment_flow(context)
+        else:
+            # Ambiguous or unrecognised — keep state and ask again
+            self.log_info("payment_method_unclear", message=context.message_body[:80])
+            context.action_type = "payment_method_unclear"
+            context.action_result = {"action": "payment_method_unclear"}
+
+    async def _handle_physical_payment_flow(self, context: PipelineContext):
+        """
+        Handle physical/cash payment:
+        1. Mark lead as converted.
+        2. Notify supervisor via Telegram with approve/reject buttons.
+        3. Also notify via WhatsApp.
+        4. Set state to AWAITING_RECEIPT (supervisor approval pending).
+        """
+        lead_id = await self._mark_lead_as_converted(context)
+
+        # Record payment method so the Telegram callback can adapt its response
+        context.cart_contents["payment_method"] = "physical"
+        # Flag proof as submitted so the AWAITING_RECEIPT gate treats messages as "review pending"
+        context.cart_contents["payment_proof_submitted"] = True
+
+        products = context.cart_contents.get("items") or context.relevant_products
+        total = sum(float(p.get("price", 0)) * int(p.get("quantity", 1)) for p in products)
+
+        # Telegram notification with approve/reject buttons (no receipt file)
+        tg_config = (context.agent_config.get("integrations") or {}).get("telegram") or {}
+        tg_chat_id = tg_config.get("supervisor_chat_id")
+        tg_notified = False
+        if settings.telegram_bot_token and tg_config.get("enabled") and tg_chat_id:
+            from app.services import telegram_service
+            sale_data = {
+                "phone": context.sender_phone,
+                "items": [
+                    {
+                        "name": p.get("name") or p.get("product_name", "Producto"),
+                        "quantity": p.get("quantity", 1),
+                        "price": float(p.get("price", 0)),
+                    }
+                    for p in products
+                ],
+                "total_price": f"${total:.2f}",
+                "checkout_data": context.checkout_data,
+                "conversation_id": str(context.conversation_id or ""),
+            }
+            await telegram_service.send_purchase_intent_notification(
+                chat_id=tg_chat_id,
+                sale_data=sale_data,
+            )
+            tg_notified = True
+
+        # WhatsApp supervisor notification
+        await self._notify_supervisor_sale_completed(context)
+
+        context.current_state = ConversationState.AWAITING_RECEIPT
+        context.action_type = "physical_payment_initiated"
+        context.action_result = {
+            "lead_id": lead_id,
+            "action": "physical_payment_initiated",
+            "payment_method": "physical",
+            "telegram_notified": tg_notified,
+            "notified": True,
+        }
+
+        self.log_info(
+            "physical_payment_flow_initiated",
+            lead_id=lead_id,
+            customer=context.sender_phone,
+            telegram_notified=tg_notified,
+        )

@@ -183,6 +183,9 @@ async def process_telegram_callback(callback_data: str, chat_id: int, message_id
         user_phone = conversation.external_user_id
         from_phone = agent.phone_number
 
+        payment_method = (conversation.cart_contents or {}).get("payment_method", "qr")
+        is_physical = payment_method == "physical"
+
         if action == "approve_sale":
             # Idempotency: only process if we're still waiting for receipt approval
             if conversation.current_state == ConversationState.ORDER_COMPLETED:
@@ -192,25 +195,41 @@ async def process_telegram_callback(callback_data: str, chat_id: int, message_id
             conversation.current_state = ConversationState.ORDER_COMPLETED
             await db.commit()
 
-            msg = "✅ ¡Tu pago ha sido aprobado! Tu pedido está siendo procesado."
+            if is_physical:
+                msg = "✅ ¡Tu compra ha sido confirmada! Nuestro equipo se pondrá en contacto contigo para coordinar el pago y la entrega. ¡Gracias! 🎉"
+                status_header = "✅ <b>PEDIDO APROBADO (PAGO FÍSICO)</b> — El usuario ha sido notificado.\n\n"
+            else:
+                msg = "✅ ¡Tu pago ha sido aprobado! Tu pedido está siendo procesado."
+                status_header = "✅ <b>PAGO APROBADO</b> — El usuario ha sido notificado.\n\n"
+
             await send_whatsapp_message(to=user_phone, body=msg, from_number=from_phone)
 
             if chat_id and message_id:
-                status_header = "✅ <b>PAGO APROBADO</b> — El usuario ha sido notificado.\n\n"
                 await edit_telegram_message_text(chat_id, message_id, _build_caption(status_header, original_caption))
 
         elif action == "reject_sale":
-            # Idempotency: only process if we're still waiting for receipt approval
-            if conversation.current_state != ConversationState.AWAITING_RECEIPT:
+            # Idempotency: only process if we're still waiting for receipt/approval
+            if conversation.current_state not in (
+                ConversationState.AWAITING_RECEIPT,
+                ConversationState.AWAITING_PAYMENT_METHOD,
+            ):
                 logger.info("telegram_callback_already_processed", conversation_id=conversation_id, state=conversation.current_state)
                 return
 
-            # No state change — keep AWAITING_RECEIPT so user can re-send proof.
-            msg = "❌ Lo sentimos, no pudimos verificar tu pago. Por favor, envía nuevamente el comprobante."
+            if is_physical:
+                # Physical rejection: order cancelled — reset to BROWSING
+                conversation.current_state = ConversationState.BROWSING
+                await db.commit()
+                msg = "❌ Lo sentimos, no podemos procesar tu pedido en este momento. Por favor, contáctanos si deseas más información."
+                status_header = "❌ <b>PEDIDO RECHAZADO (PAGO FÍSICO)</b> — El usuario ha sido notificado.\n\n"
+            else:
+                # QR rejection: keep AWAITING_RECEIPT so user can re-send proof
+                msg = "❌ Lo sentimos, no pudimos verificar tu pago. Por favor, envía nuevamente el comprobante."
+                status_header = "❌ <b>PAGO RECHAZADO</b> — El usuario puede reenviar el comprobante.\n\n"
+
             await send_whatsapp_message(to=user_phone, body=msg, from_number=from_phone)
 
             if chat_id and message_id:
-                status_header = "❌ <b>PAGO RECHAZADO</b> — El usuario puede reenviar el comprobante.\n\n"
                 await edit_telegram_message_text(chat_id, message_id, _build_caption(status_header, original_caption))
 
 

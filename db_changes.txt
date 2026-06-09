@@ -36,3 +36,34 @@ The relationship is now a simple one-way FK: lead.conversation_id → sales_conv
 The old circular dependency (sales_conversation.lead_id ↔ lead.conversations) is gone.
 The "current lead" for a conversation is always the most recently created lead
 with that conversation_id (ORDER BY id DESC LIMIT 1).
+
+----------------------------------------------------------------------
+4. New ConversationState value: awaiting_payment_method
+----------------------------------------------------------------------
+The sales_conversation.current_state column is VARCHAR(50) — no DDL change
+is required. The ORM enum in app/models/conversation.py and the Pydantic
+enum in app/schemas/pipeline.py both now include:
+
+    AWAITING_PAYMENT_METHOD = "awaiting_payment_method"
+
+This state is entered when both QR and physical payment methods are enabled
+for an agent instance and the customer has completed checkout data collection.
+The agent asks the customer which payment method they prefer before proceeding.
+
+Existing rows are unaffected; the value will only appear in new conversations.
+
+----------------------------------------------------------------------
+5. New cart_contents fields written during payment flows
+----------------------------------------------------------------------
+The sales_conversation.cart_contents JSONB column gains two new keys
+(no schema change needed, JSONB is schemaless):
+
+  • "payment_method": "qr" | "physical"
+      Set when the customer picks a payment method (or on direct physical
+      flow). Read by the Telegram webhook callback to determine approval
+      message text and post-rejection state.
+
+  • "payment_proof_submitted": true
+      Already existed for QR flow. Also set immediately for the physical
+      flow (no actual proof is sent; the flag prevents the AWAITING_RECEIPT
+      gate from asking the customer to re-send a receipt).

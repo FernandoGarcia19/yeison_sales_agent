@@ -397,10 +397,31 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         """
         Generate fallback template-based response when AI fails.
         """
-        
-        # Handle payment proof received specially
+
+        # Handle payment-flow action types first
         if context.action_type == "payment_proof_received":
             return self._payment_proof_response(context)
+
+        if context.action_type == "awaiting_payment_method_selection":
+            return (
+                "¡Perfecto! Tenemos dos métodos de pago disponibles:\n\n"
+                "1️⃣ *QR* — Escanea el código con tu billetera digital y paga al instante.\n"
+                "2️⃣ *Físico / Efectivo* — Uno de nuestros representantes coordinará el pago contigo.\n\n"
+                "¿Cuál prefieres?"
+            )
+
+        if context.action_type == "payment_method_unclear":
+            return (
+                "Disculpa, no entendí tu elección. 😊\n"
+                "Por favor indica si prefieres pagar con *QR* (billetera digital) o en *efectivo/físico*."
+            )
+
+        if context.action_type == "physical_payment_initiated":
+            return (
+                "✅ ¡Entendido! Tu pedido ha sido registrado para pago físico/efectivo. "
+                "Nuestro equipo revisará tu solicitud y se pondrá en contacto contigo para coordinar el pago. "
+                "¡Gracias por tu compra! 🎉"
+            )
         
         # Simple template-based responses (placeholder)
         if context.intent == IntentType.GREETING:
@@ -479,24 +500,38 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
     
     def _purchase_intent_response(self, context: PipelineContext) -> str:
         """Generate purchase intent response."""
-        
+
         # Check if QR payment was initiated
         if context.action_result:
             action = context.action_result.get("action", "")
-            
+
             if action == "awaiting_payment_proof":
-                # QR was sent, ask customer to scan
                 return "✅ Te acabo de enviar el código QR. Por favor escanéalo con tu billetera digital para completar el pago."
+            elif action == "awaiting_payment_method_selection":
+                return (
+                    "¡Perfecto! Tenemos dos métodos de pago disponibles:\n\n"
+                    "1️⃣ *QR* — Escanea el código con tu billetera digital y paga al instante.\n"
+                    "2️⃣ *Físico / Efectivo* — Uno de nuestros representantes coordinará el pago contigo.\n\n"
+                    "¿Cuál prefieres?"
+                )
+            elif action == "payment_method_unclear":
+                return (
+                    "Disculpa, no entendí tu elección. 😊\n"
+                    "Por favor indica si prefieres pagar con *QR* (billetera digital) o en *efectivo/físico*."
+                )
+            elif action == "physical_payment_initiated":
+                return (
+                    "✅ ¡Entendido! Tu pedido ha sido registrado para pago físico/efectivo. "
+                    "Nuestro equipo revisará tu solicitud y se pondrá en contacto contigo para coordinar el pago. "
+                    "¡Gracias por tu compra! 🎉"
+                )
             elif action == "sale_completed":
-                # Non-QR payment, sale is complete
                 return "¡Excelente! Tu compra ha sido confirmada. Nuestro equipo se pondrá en contacto contigo pronto."
             elif action == "qr_payment_failed":
-                # QR failed, provide alternative
                 return "Disculpa, tuvimos un problema al enviar el QR. Por favor intenta de nuevo o contacta con nuestro equipo."
             elif action == "qualify_lead":
-                # Not ready yet
                 return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Cuál plan te interesa? (Plan Estándar $100/mes o Plan Premium $200/mes)"
-        
+
         # Default response
         return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Qué producto te gustaría adquirir?"
     

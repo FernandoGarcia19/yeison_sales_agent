@@ -156,12 +156,33 @@ class ContextBuilderStage(BasePipelineStage):
                 f"Pide amablemente la información faltante. NO envíes el QR ni menciones el pago "
                 f"hasta que el usuario haya proporcionado todos los datos requeridos."
             )
+        elif current_state == ConversationState.AWAITING_PAYMENT_METHOD:
+            state_instructions = (
+                "El usuario ya confirmó su compra y proporcionó todos los datos necesarios. "
+                "Ahora debe elegir su método de pago. Tenemos disponibles: pago con QR (billetera digital) "
+                "y pago físico/efectivo. Pregunta amablemente cuál prefiere. "
+                "No cambies de tema hasta recibir su respuesta."
+            )
         elif current_state == ConversationState.AWAITING_RECEIPT:
+            payment_method = context.cart_contents.get("payment_method", "qr")
             proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
-            if proof_submitted:
-                state_instructions = "El usuario ya envió su comprobante de pago y está esperando la aprobación del supervisor. Informa amablemente que estamos revisando su pago y que recibirán una confirmación pronto. NO pidas el comprobante de nuevo."
+            if payment_method == "physical":
+                state_instructions = (
+                    "El usuario eligió pago físico/efectivo. Su pedido fue enviado al supervisor para aprobación. "
+                    "Informa amablemente que su pedido está siendo revisado y que el equipo se pondrá en contacto "
+                    "para coordinar el pago. NO pidas ningún comprobante."
+                )
+            elif proof_submitted:
+                state_instructions = (
+                    "El usuario ya envió su comprobante de pago QR y está esperando la aprobación del supervisor. "
+                    "Informa amablemente que estamos revisando su pago y que recibirán una confirmación pronto. "
+                    "NO pidas el comprobante de nuevo."
+                )
             else:
-                state_instructions = "Estamos esperando que el usuario envíe una foto o captura de su comprobante de pago QR. No respondas preguntas no relacionadas. Recuérdales amablemente que deben enviar la imagen del comprobante."
+                state_instructions = (
+                    "Estamos esperando que el usuario envíe una foto o captura de su comprobante de pago QR. "
+                    "No respondas preguntas no relacionadas. Recuérdales amablemente que deben enviar la imagen del comprobante."
+                )
             
         if state_instructions:
             if not context.agent_config.get("operations_info"):

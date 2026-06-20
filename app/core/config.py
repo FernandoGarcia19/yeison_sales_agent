@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # X-Telegram-Bot-Api-Secret-Token matching this value.
     telegram_webhook_secret: Optional[str] = None
 
+    # Token encryption — must match the key used by yeison_panel_backend
+    # (same Fernet key, 32-byte urlsafe base64-encoded)
+    encryption_key: Optional[str] = None
+
     # Cloudflare R2 Storage
     r2_endpoint_url: str = ""
     r2_access_key_id: str = ""

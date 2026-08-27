@@ -8,12 +8,22 @@ class Settings(BaseSettings):
     version: str = "1.0.0"
     debug: bool = False
     
-    # WhatsApp/Twilio settings
+    # WhatsApp provider settings
+    whatsapp_provider_default: str = "evolution"
     whatsapp_verify_token: Optional[str] = None
     whatsapp_access_token: Optional[str] = None
+
+    # Legacy Twilio settings (deprecated; keep for rollback only)
     twilio_account_sid: Optional[str] = None
     twilio_auth_token: Optional[str] = None
     twilio_phone_number: Optional[str] = None
+
+    # Evolution API settings
+    evolution_api_url: Optional[str] = None
+    evolution_api_key: Optional[str] = None
+    evolution_webhook_secret: Optional[str] = None
+    evolution_send_text_path: str = "/message/sendText/{instance}"
+    evolution_send_media_path: str = "/message/sendMedia/{instance}"
     
     # Database settings
     database_url: Optional[str] = None

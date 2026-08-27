@@ -53,7 +53,7 @@ class PipelineContext(BaseModel):
     """
     
     # Input data
-    message_sid: str = Field(..., description="Twilio message SID")
+    message_sid: str = Field(..., description="Provider message identifier")
     sender_phone: str = Field(..., description="Sender's phone number")
     recipient_phone: str = Field(..., description="Agent's phone number")
     message_body: str = Field(..., description="Message text content")
@@ -127,7 +127,7 @@ class PipelineResult(BaseModel):
     """Result of pipeline execution."""
     
     success: bool = Field(..., description="Whether pipeline succeeded")
-    message_sid: str = Field(..., description="Message SID that was processed")
+    message_sid: str = Field(..., description="Provider message identifier that was processed")
     response_sent: bool = Field(default=False, description="Whether response was sent")
     response_message_sid: Optional[str] = Field(None, description="Response message SID")
     intent: Optional[str] = Field(None, description="Classified intent")

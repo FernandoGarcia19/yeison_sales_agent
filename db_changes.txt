@@ -31,13 +31,35 @@ WHERE  sc.lead_id = l.id
 ----------------------------------------------------------------------
 Environment variable required (no DDL change)
 ----------------------------------------------------------------------
-The sales agent now decrypts per-tenant Twilio auth tokens from
-whatsapp_connection.twilio_auth_token_encrypted. Add to .env:
+The sales agent now uses shared Evolution host credentials from .env.
+Add to .env:
 
-    ENCRYPTION_KEY=<same 32-byte urlsafe-base64 value as panel_backend>
+    EVOLUTION_API_URL=<shared Evolution API base URL>
+    EVOLUTION_API_KEY=<shared Evolution API key>
+    EVOLUTION_WEBHOOK_SECRET=<shared webhook secret>
 
-Without this, the agent falls back to the global TWILIO_AUTH_TOKEN for
-both webhook validation and outgoing messages (sandbox/dev only).
+Only the per-agent instance name is stored in whatsapp_connection.
+Twilio remains available only as deprecated rollback support.
+
+----------------------------------------------------------------------
+6. Keep only per-agent Evolution connection fields in whatsapp_connection
+----------------------------------------------------------------------
+-- Evolution is now the default provider. Shared host credentials live in .env.
+
+ALTER TABLE public.whatsapp_connection
+    ADD COLUMN IF NOT EXISTS provider VARCHAR(20) NOT NULL DEFAULT 'evolution',
+    ADD COLUMN IF NOT EXISTS evolution_instance_name VARCHAR(255);
+
+ALTER TABLE public.whatsapp_connection
+    DROP COLUMN IF EXISTS evolution_api_url,
+    DROP COLUMN IF EXISTS evolution_api_key_encrypted,
+    DROP COLUMN IF EXISTS evolution_webhook_secret_encrypted;
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_connection_provider
+    ON public.whatsapp_connection(provider);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_connection_evolution_instance_name
+    ON public.whatsapp_connection(evolution_instance_name);
 
 ----------------------------------------------------------------------
 Why these changes exist

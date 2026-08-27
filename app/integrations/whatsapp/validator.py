@@ -1,15 +1,8 @@
 """
-Twilio webhook signature validation.
+Webhook validation for WhatsApp providers.
 
-Each tenant's Twilio subaccount signs webhooks with its own auth token —
-not the master account token. We look up the subaccount token by the
-recipient phone number (the "To" field in the form payload) and use
-Twilio's official RequestValidator so the algorithm stays in sync with
-Twilio's implementation.
-
-Fallback: if no subaccount is found (e.g. sandbox testing, unconfigured
-agent), we fall back to ``settings.twilio_auth_token`` so local development
-still works without a full ISV setup.
+Evolution API is the primary provider. Twilio validation remains available as
+deprecated compatibility for legacy tenants.
 """
 
 from fastapi import Request
@@ -17,7 +10,7 @@ from twilio.request_validator import RequestValidator
 import structlog
 
 from app.core.config import settings
-from app.services.twilio_credentials import get_subaccount_credentials
+from app.services.whatsapp_connections import get_whatsapp_connection_for_phone
 
 logger = structlog.get_logger()
 
@@ -34,7 +27,8 @@ async def validate_twilio_signature(request: Request, form_data: dict) -> bool:
 
     # Resolve the auth token: per-tenant subaccount first, global fallback.
     to_phone = form_data.get("To", "")
-    _, auth_token = await get_subaccount_credentials(to_phone)
+    connection = await get_whatsapp_connection_for_phone(to_phone)
+    auth_token = (connection or {}).get("twilio_auth_token")
 
     if not auth_token:
         auth_token = settings.twilio_auth_token
@@ -56,3 +50,26 @@ async def validate_twilio_signature(request: Request, form_data: dict) -> bool:
         )
 
     return is_valid
+
+
+async def validate_evolution_webhook(request: Request, payload: dict) -> bool:
+    """Validate an Evolution webhook using the shared Evolution secret when configured."""
+    expected_secret = settings.evolution_webhook_secret
+
+    if not expected_secret:
+        logger.warning("evolution_webhook_secret_missing")
+        return True
+
+    received_secret = (
+        request.headers.get("X-Evolution-Webhook-Secret")
+        or request.headers.get("X-Evolution-Secret")
+        or request.headers.get("x-evolution-webhook-secret")
+        or request.headers.get("x-evolution-secret")
+        or ""
+    )
+
+    if received_secret != expected_secret:
+        logger.warning("evolution_webhook_secret_invalid")
+        return False
+
+    return True

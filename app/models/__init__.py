@@ -12,6 +12,7 @@ from app.models.lead import Lead
 from app.models.conversation import SalesConversation
 from app.models.configuration_tenant import ConfigurationTenant
 from app.models.whatsapp_connection import WhatsAppConnection
+from app.models.sale import Sale
 
 __all__ = [
     "Tenant",
@@ -21,4 +22,5 @@ __all__ = [
     "SalesConversation",
     "ConfigurationTenant",
     "WhatsAppConnection",
+    "Sale",
 ]

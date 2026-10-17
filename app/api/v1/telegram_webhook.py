@@ -7,6 +7,7 @@ from app.schemas.pipeline import ConversationState
 from app.integrations.whatsapp.client import send_whatsapp_message
 import httpx
 from app.core.config import settings
+from app.services.sale_recorder import record_sale
 
 _TELEGRAM_SECRET_HEADER = "x-telegram-bot-api-secret-token"
 _TELEGRAM_CAPTION_LIMIT = 1024
@@ -243,6 +244,13 @@ async def process_telegram_callback(callback_data: str, chat_id: int, message_id
                 return
 
             conversation.current_state = ConversationState.ORDER_COMPLETED
+            # Y-12: the approved order becomes a sale. A failure here must not block the
+            # approval the customer is waiting for, so it runs in a savepoint and is logged.
+            try:
+                async with db.begin_nested():
+                    await record_sale(db, conversation, agent, payment_method="physical" if is_physical else "qr")
+            except Exception as e:
+                logger.error("sale_record_failed", conversation_id=conversation_id, error=str(e))
             await db.commit()
 
             if is_physical:

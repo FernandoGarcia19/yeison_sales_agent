@@ -26,6 +26,8 @@ class Tenant(Base, TimestampMixin, ActiveMixin):
     provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     provider_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Business profile (Y-30), managed by panel_backend
+    base_currency: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
     
     # Relationships (for query convenience)
     agent_instances: Mapped[List["AgentInstance"]] = relationship(

@@ -18,22 +18,42 @@ jobs:
           username: ${{ secrets.VPS_USER }} # usually 'root' or 'ubuntu'
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            set -eu
+
             # Determine which environment to update based on the branch
             if [ "${{ github.ref }}" = "refs/heads/main" ]; then
               PROJECT_DIR="/var/www/production"
+              REPO_DIR="yeison_sales_agent"
+              CONTAINER="yeison_prod_sales_agent"
+              HEALTH_PORT=8090
             elif [ "${{ github.ref }}" = "refs/heads/staging" ]; then
               PROJECT_DIR="/var/www/staging"
+              REPO_DIR="yeison_sales_agent"
+              CONTAINER="yeison_staging_sales_agent"
+              HEALTH_PORT=8091
+            else
+              echo "No deploy target for ${{ github.ref }}"
+              exit 1
             fi
 
-            echo "Deploying to $PROJECT_DIR"
-
-            # Navigate to the specific microservice folder
-            cd $PROJECT_DIR/yeison_sales_agent
+            echo "Deploying to $PROJECT_DIR/$REPO_DIR"
 
             # Pull latest changes
+            cd "$PROJECT_DIR/$REPO_DIR"
             git pull origin ${{ github.ref_name }}
 
-            # Navigate back to the docker-compose root
-            cd $PROJECT_DIR
-
+            # Rebuild and restart the service from the docker-compose root
+            cd "$PROJECT_DIR"
             docker compose up -d --build yeison_app
+
+            # Fail the job if the service does not come up healthy
+            for i in $(seq 1 30); do
+              if curl -fsS "http://127.0.0.1:$HEALTH_PORT/health" > /dev/null; then
+                echo "Healthy on port $HEALTH_PORT"
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "Not healthy on port $HEALTH_PORT after 150s"
+            docker logs --tail 50 "$CONTAINER" || true
+            exit 1

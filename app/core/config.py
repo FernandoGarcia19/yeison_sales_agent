@@ -32,7 +32,8 @@ class Settings(BaseSettings):
     
     # AI/LLM settings
     openai_api_key: Optional[str] = None
-    openai_model: str = "gpt-4-turbo-preview"
+    # gpt-4-turbo costs ~USD 10/30 per 1M tokens (in/out); gpt-5.4-mini ~USD 0.75/4.50
+    openai_model: str = "gpt-5.4-mini"
     openai_temperature: float = 0.7
     openai_max_tokens: int = 500
     
@@ -51,6 +52,10 @@ class Settings(BaseSettings):
     # telegram_webhook_secret: optional — when set, inbound callbacks must carry
     # X-Telegram-Bot-Api-Secret-Token matching this value.
     telegram_webhook_secret: Optional[str] = None
+
+    # Token encryption — must match the key used by yeison_panel_backend
+    # (same Fernet key, 32-byte urlsafe base64-encoded)
+    encryption_key: Optional[str] = None
 
     # Cloudflare R2 Storage
     r2_endpoint_url: str = ""

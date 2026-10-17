@@ -1,75 +1,58 @@
 """
-Twilio signature validation for webhook security.
+Twilio webhook signature validation.
+
+Each tenant's Twilio subaccount signs webhooks with its own auth token —
+not the master account token. We look up the subaccount token by the
+recipient phone number (the "To" field in the form payload) and use
+Twilio's official RequestValidator so the algorithm stays in sync with
+Twilio's implementation.
+
+Fallback: if no subaccount is found (e.g. sandbox testing, unconfigured
+agent), we fall back to ``settings.twilio_auth_token`` so local development
+still works without a full ISV setup.
 """
 
-import hashlib
-import hmac
-from urllib.parse import urljoin
 from fastapi import Request
+from twilio.request_validator import RequestValidator
 import structlog
 
 from app.core.config import settings
+from app.services.twilio_credentials import get_subaccount_credentials
 
 logger = structlog.get_logger()
 
 
-async def validate_twilio_signature(
-    request: Request,
-    form_data: dict
-) -> bool:
+async def validate_twilio_signature(request: Request, form_data: dict) -> bool:
     """
-    Validate that the webhook request came from Twilio.
-    
-    Twilio signs all webhook requests with your auth token.
-    See: https://www.twilio.com/docs/usage/security#validating-requests
-    
-    Args:
-        request: FastAPI request object
-        form_data: Form data from the request
-    
-    Returns:
-        True if signature is valid, False otherwise
+    Validate the X-Twilio-Signature header using the per-tenant subaccount
+    auth token.  Returns True if the signature is valid, False otherwise.
     """
-    
-    if not settings.twilio_auth_token:
-        logger.warning("twilio_auth_token_not_set")
-        # In development, allow requests without validation
-        return settings.debug
-    
-    # Get the signature from headers
     signature = request.headers.get("X-Twilio-Signature", "")
-    
     if not signature:
         logger.warning("missing_twilio_signature")
         return False
-    
-    # Build the full URL (Twilio uses the full URL in signature)
+
+    # Resolve the auth token: per-tenant subaccount first, global fallback.
+    to_phone = form_data.get("To", "")
+    _, auth_token = await get_subaccount_credentials(to_phone)
+
+    if not auth_token:
+        auth_token = settings.twilio_auth_token
+
+    if not auth_token:
+        logger.warning("no_auth_token_available_for_validation", to=to_phone)
+        # Allow in debug mode so local sandbox testing still works.
+        return settings.debug
+
     url = str(request.url)
-    
-    # Sort parameters and concatenate
-    # Format: URLparamname1value1paramname2value2...
-    sorted_params = sorted(form_data.items())
-    data = url + "".join(f"{k}{v}" for k, v in sorted_params)
-    
-    # Compute HMAC-SHA256 signature
-    computed_signature = hmac.new(
-        settings.twilio_auth_token.encode("utf-8"),
-        data.encode("utf-8"),
-        hashlib.sha1
-    ).digest()
-    
-    # Encode to base64
-    import base64
-    computed_signature_b64 = base64.b64encode(computed_signature).decode()
-    
-    # Compare signatures (timing-safe comparison)
-    is_valid = hmac.compare_digest(signature, computed_signature_b64)
-    
+    validator = RequestValidator(auth_token)
+    is_valid = validator.validate(url, form_data, signature)
+
     if not is_valid:
         logger.warning(
-            "signature_mismatch",
-            expected=computed_signature_b64[:10] + "...",
-            received=signature[:10] + "..."
+            "twilio_signature_invalid",
+            to=to_phone,
+            url=url,
         )
-    
+
     return is_valid

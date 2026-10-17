@@ -7,9 +7,13 @@ from app.schemas.pipeline import ConversationState
 from app.integrations.whatsapp.client import send_whatsapp_message
 import httpx
 from app.core.config import settings
+from app.services.sale_recorder import record_sale
 
 _TELEGRAM_SECRET_HEADER = "x-telegram-bot-api-secret-token"
 _TELEGRAM_CAPTION_LIMIT = 1024
+# Member links from the panel (Y-32) look like "m_<hex>"; supervisor links are "{agent_id}_<hex>"
+_MEMBER_TOKEN_PREFIX = "m_"
+_ROLE_NAMES = {"owner": "dueño", "manager": "encargado", "accountant": "contador", "employee": "empleado"}
 
 
 def _build_caption(status_header: str, original_caption: str) -> str:
@@ -73,7 +77,17 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         if text.startswith("/start") and chat_id:
             parts = text.split(" ", 1)
             token = parts[1].strip() if len(parts) > 1 else ""
-            if token:
+            if token.startswith(_MEMBER_TOKEN_PREFIX):
+                sender = message.get("from") or {}
+                background_tasks.add_task(
+                    _process_member_connect,
+                    token=token,
+                    chat_id=str(chat_id),
+                    telegram_user_id=sender.get("id"),
+                    username=sender.get("username"),
+                    language_code=sender.get("language_code"),
+                )
+            elif token:
                 background_tasks.add_task(_process_connect_start, token=token, chat_id=str(chat_id))
 
     return {"status": "ok"}
@@ -124,6 +138,65 @@ async def _process_connect_start(token: str, chat_id: str) -> None:
             chat_id,
             "⚠️ Error al comunicarse con el servidor. Por favor intenta de nuevo.",
         )
+
+
+async def _process_member_connect(token: str, chat_id: str, telegram_user_id, username, language_code) -> None:
+    """Link this Telegram account to a person of the business via panel_backend (Y-32)."""
+    if not settings.backend_api_url or not settings.backend_api_key or not telegram_user_id:
+        logger.error("telegram_member_connect_missing_config_or_user")
+        await _send_telegram_message(chat_id, "⚠️ No se pudo vincular la cuenta. Intenta de nuevo más tarde.")
+        return
+
+    url = f"{settings.backend_api_url.rstrip('/')}/internal/telegram/member-connect"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                url,
+                json={"token": token, "telegram_user_id": telegram_user_id, "chat_id": chat_id,
+                      "username": username, "language_code": language_code},
+                headers={"x-internal-key": settings.backend_api_key},
+            )
+    except Exception as e:
+        logger.error("telegram_member_connect_request_failed", error=str(e), chat_id=chat_id)
+        await _send_telegram_message(chat_id, "⚠️ Error al comunicarse con el servidor. Intenta de nuevo.")
+        return
+
+    if response.status_code == 200:
+        data = response.json()
+        role = _ROLE_NAMES.get(data.get("role"), data.get("role"))
+        logger.info("telegram_member_linked", chat_id=chat_id, role=data.get("role"))
+        await _send_telegram_message(
+            chat_id,
+            f"✅ ¡Hola {data.get('member_name')}! Quedaste vinculado a {data.get('tenant_name')} como {role}.",
+        )
+    elif response.status_code == 400:
+        await _send_telegram_message(
+            chat_id, "❌ El enlace no es válido o ya venció. Pide uno nuevo en el panel de Yeison.")
+    else:
+        logger.error("telegram_member_connect_unexpected_status", status=response.status_code, chat_id=chat_id)
+        await _send_telegram_message(chat_id, "⚠️ Error interno al vincular. Intenta de nuevo.")
+
+
+async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> None:
+    """Ask panel_backend to record the SALE_EXIT movements of a sale. Failures are logged, never raised."""
+    if not settings.backend_api_url or not settings.backend_api_key:
+        logger.error("stock_exit_missing_backend_config", sale_id=sale_id)
+        return
+    items = [{"product_id": i.get("product_id"), "quantity": i.get("quantity")}
+             for i in sale_items or [] if i.get("product_id")]
+    if not items:
+        return
+    url = f"{settings.backend_api_url.rstrip('/')}/internal/inventory/sale-exit"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, json={"tenant_id": tenant_id, "sale_id": sale_id, "items": items},
+                                         headers={"x-internal-key": settings.backend_api_key})
+        if response.status_code != 200:
+            logger.error("stock_exit_failed", sale_id=sale_id, status=response.status_code, body=response.text[:200])
+        else:
+            logger.info("stock_exit_recorded", sale_id=sale_id, movements=len(response.json().get("movements", [])))
+    except Exception as e:
+        logger.error("stock_exit_request_failed", sale_id=sale_id, error=str(e))
 
 
 async def _send_telegram_message(chat_id: str, text: str) -> None:
@@ -193,7 +266,19 @@ async def process_telegram_callback(callback_data: str, chat_id: int, message_id
                 return
 
             conversation.current_state = ConversationState.ORDER_COMPLETED
+            # Y-12: the approved order becomes a sale. A failure here must not block the
+            # approval the customer is waiting for, so it runs in a savepoint and is logged.
+            sale = None
+            try:
+                async with db.begin_nested():
+                    sale = await record_sale(db, conversation, agent,
+                                             payment_method="physical" if is_physical else "qr")
+            except Exception as e:
+                logger.error("sale_record_failed", conversation_id=conversation_id, error=str(e))
             await db.commit()
+            if sale:
+                # Y-36: discount stock through the panel's inventory ledger (idempotent per sale)
+                await _discount_stock(sale.tenant_id, sale.id, sale.sale_items)
 
             if is_physical:
                 msg = "✅ ¡Tu compra ha sido confirmada! Nuestro equipo se pondrá en contacto contigo para coordinar el pago y la entrega. ¡Gracias! 🎉"

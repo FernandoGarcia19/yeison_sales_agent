@@ -29,6 +29,17 @@ WHERE  sc.lead_id = l.id
   AND  l.conversation_id IS NULL;
 
 ----------------------------------------------------------------------
+Environment variable required (no DDL change)
+----------------------------------------------------------------------
+The sales agent now decrypts per-tenant Twilio auth tokens from
+whatsapp_connection.twilio_auth_token_encrypted. Add to .env:
+
+    ENCRYPTION_KEY=<same 32-byte urlsafe-base64 value as panel_backend>
+
+Without this, the agent falls back to the global TWILIO_AUTH_TOKEN for
+both webhook validation and outgoing messages (sandbox/dev only).
+
+----------------------------------------------------------------------
 Why these changes exist
 ----------------------------------------------------------------------
 A SalesConversation owns MULTIPLE leads — one per "purchase cycle".

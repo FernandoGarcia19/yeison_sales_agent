@@ -10,6 +10,9 @@ from app.core.config import settings
 
 _TELEGRAM_SECRET_HEADER = "x-telegram-bot-api-secret-token"
 _TELEGRAM_CAPTION_LIMIT = 1024
+# Member links from the panel (Y-32) look like "m_<hex>"; supervisor links are "{agent_id}_<hex>"
+_MEMBER_TOKEN_PREFIX = "m_"
+_ROLE_NAMES = {"owner": "dueño", "manager": "encargado", "accountant": "contador", "employee": "empleado"}
 
 
 def _build_caption(status_header: str, original_caption: str) -> str:
@@ -73,7 +76,17 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         if text.startswith("/start") and chat_id:
             parts = text.split(" ", 1)
             token = parts[1].strip() if len(parts) > 1 else ""
-            if token:
+            if token.startswith(_MEMBER_TOKEN_PREFIX):
+                sender = message.get("from") or {}
+                background_tasks.add_task(
+                    _process_member_connect,
+                    token=token,
+                    chat_id=str(chat_id),
+                    telegram_user_id=sender.get("id"),
+                    username=sender.get("username"),
+                    language_code=sender.get("language_code"),
+                )
+            elif token:
                 background_tasks.add_task(_process_connect_start, token=token, chat_id=str(chat_id))
 
     return {"status": "ok"}
@@ -124,6 +137,43 @@ async def _process_connect_start(token: str, chat_id: str) -> None:
             chat_id,
             "⚠️ Error al comunicarse con el servidor. Por favor intenta de nuevo.",
         )
+
+
+async def _process_member_connect(token: str, chat_id: str, telegram_user_id, username, language_code) -> None:
+    """Link this Telegram account to a person of the business via panel_backend (Y-32)."""
+    if not settings.backend_api_url or not settings.backend_api_key or not telegram_user_id:
+        logger.error("telegram_member_connect_missing_config_or_user")
+        await _send_telegram_message(chat_id, "⚠️ No se pudo vincular la cuenta. Intenta de nuevo más tarde.")
+        return
+
+    url = f"{settings.backend_api_url.rstrip('/')}/internal/telegram/member-connect"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                url,
+                json={"token": token, "telegram_user_id": telegram_user_id, "chat_id": chat_id,
+                      "username": username, "language_code": language_code},
+                headers={"x-internal-key": settings.backend_api_key},
+            )
+    except Exception as e:
+        logger.error("telegram_member_connect_request_failed", error=str(e), chat_id=chat_id)
+        await _send_telegram_message(chat_id, "⚠️ Error al comunicarse con el servidor. Intenta de nuevo.")
+        return
+
+    if response.status_code == 200:
+        data = response.json()
+        role = _ROLE_NAMES.get(data.get("role"), data.get("role"))
+        logger.info("telegram_member_linked", chat_id=chat_id, role=data.get("role"))
+        await _send_telegram_message(
+            chat_id,
+            f"✅ ¡Hola {data.get('member_name')}! Quedaste vinculado a {data.get('tenant_name')} como {role}.",
+        )
+    elif response.status_code == 400:
+        await _send_telegram_message(
+            chat_id, "❌ El enlace no es válido o ya venció. Pide uno nuevo en el panel de Yeison.")
+    else:
+        logger.error("telegram_member_connect_unexpected_status", status=response.status_code, chat_id=chat_id)
+        await _send_telegram_message(chat_id, "⚠️ Error interno al vincular. Intenta de nuevo.")
 
 
 async def _send_telegram_message(chat_id: str, text: str) -> None:

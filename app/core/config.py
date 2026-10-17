@@ -32,7 +32,8 @@ class Settings(BaseSettings):
     
     # AI/LLM settings
     openai_api_key: Optional[str] = None
-    openai_model: str = "gpt-4-turbo-preview"
+    # gpt-4-turbo costs ~USD 10/30 per 1M tokens (in/out); gpt-5.4-mini ~USD 0.75/4.50
+    openai_model: str = "gpt-5.4-mini"
     openai_temperature: float = 0.7
     openai_max_tokens: int = 500
     

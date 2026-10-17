@@ -269,7 +269,7 @@ TWILIO_PHONE_NUMBER=+14155238886
 
 # OpenAI
 OPENAI_API_KEY=your_key
-OPENAI_MODEL=gpt-4-turbo-preview
+OPENAI_MODEL=gpt-5.4-mini
 
 # Main Backend
 BACKEND_API_URL=http://localhost:3000/api

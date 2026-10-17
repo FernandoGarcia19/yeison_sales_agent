@@ -12,8 +12,6 @@ from fastapi import FastAPI  # noqa: E402
 from app.api.v1 import telegram_webhook as tw  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
-pytestmark = pytest.mark.asyncio
-
 _RealAsyncClient = httpx.AsyncClient  # the fixture patches httpx.AsyncClient for the panel calls
 
 

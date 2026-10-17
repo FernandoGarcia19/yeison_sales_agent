@@ -39,7 +39,14 @@ async def factory(monkeypatch):
     monkeypatch.setattr(tw, "get_session_factory", lambda: session_factory)
     monkeypatch.setattr(tw, "send_whatsapp_message", fake_whatsapp)
     monkeypatch.setattr(tw, "edit_telegram_message_text", fake_edit)
+    stock_exits = []
+
+    async def fake_discount(tenant_id, sale_id, sale_items):
+        stock_exits.append((tenant_id, sale_id, [(i["product_id"], i["quantity"]) for i in sale_items]))
+
+    monkeypatch.setattr(tw, "_discount_stock", fake_discount)
     session_factory.sent = sent
+    session_factory.stock_exits = stock_exits
     yield session_factory
     await engine.dispose()
 
@@ -99,6 +106,7 @@ async def test_qr_approval_records_a_paid_sale(factory):
     assert sale.currency == "BOB"
     assert [i["name"] for i in sale.sale_items] == ["Zapatilla", "Medias"]
     assert factory.sent and "aprobado" in factory.sent[0]
+    assert factory.stock_exits == [(order["tenant_id"], sale.id, [(1, 2), (2, 1)])]
 
 
 async def test_physical_approval_records_a_pending_payment(factory):
@@ -113,12 +121,14 @@ async def test_approving_twice_records_one_sale(factory):
     for _ in range(2):
         await tw.process_telegram_callback(f"approve_sale_{order['conversation_id']}", chat_id=1, message_id=1)
     assert len(await _sales(factory, order["conversation_id"])) == 1
+    assert len(factory.stock_exits) == 1
 
 
 async def test_missing_lead_still_approves_the_order(factory):
     order = await _order(factory, with_lead=False)
     await tw.process_telegram_callback(f"approve_sale_{order['conversation_id']}", chat_id=1, message_id=1)
     assert await _sales(factory, order["conversation_id"]) == []
+    assert factory.stock_exits == []
     async with factory() as db:
         state = (await db.execute(text("select current_state from sales_conversation where id = :i"),
                                   {"i": order["conversation_id"]})).scalar_one()

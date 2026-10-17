@@ -177,6 +177,28 @@ async def _process_member_connect(token: str, chat_id: str, telegram_user_id, us
         await _send_telegram_message(chat_id, "⚠️ Error interno al vincular. Intenta de nuevo.")
 
 
+async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> None:
+    """Ask panel_backend to record the SALE_EXIT movements of a sale. Failures are logged, never raised."""
+    if not settings.backend_api_url or not settings.backend_api_key:
+        logger.error("stock_exit_missing_backend_config", sale_id=sale_id)
+        return
+    items = [{"product_id": i.get("product_id"), "quantity": i.get("quantity")}
+             for i in sale_items or [] if i.get("product_id")]
+    if not items:
+        return
+    url = f"{settings.backend_api_url.rstrip('/')}/internal/inventory/sale-exit"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, json={"tenant_id": tenant_id, "sale_id": sale_id, "items": items},
+                                         headers={"x-internal-key": settings.backend_api_key})
+        if response.status_code != 200:
+            logger.error("stock_exit_failed", sale_id=sale_id, status=response.status_code, body=response.text[:200])
+        else:
+            logger.info("stock_exit_recorded", sale_id=sale_id, movements=len(response.json().get("movements", [])))
+    except Exception as e:
+        logger.error("stock_exit_request_failed", sale_id=sale_id, error=str(e))
+
+
 async def _send_telegram_message(chat_id: str, text: str) -> None:
     if not settings.telegram_bot_token:
         return
@@ -246,12 +268,17 @@ async def process_telegram_callback(callback_data: str, chat_id: int, message_id
             conversation.current_state = ConversationState.ORDER_COMPLETED
             # Y-12: the approved order becomes a sale. A failure here must not block the
             # approval the customer is waiting for, so it runs in a savepoint and is logged.
+            sale = None
             try:
                 async with db.begin_nested():
-                    await record_sale(db, conversation, agent, payment_method="physical" if is_physical else "qr")
+                    sale = await record_sale(db, conversation, agent,
+                                             payment_method="physical" if is_physical else "qr")
             except Exception as e:
                 logger.error("sale_record_failed", conversation_id=conversation_id, error=str(e))
             await db.commit()
+            if sale:
+                # Y-36: discount stock through the panel's inventory ledger (idempotent per sale)
+                await _discount_stock(sale.tenant_id, sale.id, sale.sale_items)
 
             if is_physical:
                 msg = "✅ ¡Tu compra ha sido confirmada! Nuestro equipo se pondrá en contacto contigo para coordinar el pago y la entrega. ¡Gracias! 🎉"

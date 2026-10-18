@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Request, BackgroundTasks, HTTPException
 import structlog
 from app.core.database import get_session_factory
@@ -14,6 +16,7 @@ _TELEGRAM_CAPTION_LIMIT = 1024
 # Member links from the panel (Y-32) look like "m_<hex>"; supervisor links are "{agent_id}_<hex>"
 _MEMBER_TOKEN_PREFIX = "m_"
 _ROLE_NAMES = {"owner": "dueño", "manager": "encargado", "accountant": "contador", "employee": "empleado"}
+_DIRECTOR_CALLBACK_PREFIX = "dir_"
 
 
 def _build_caption(status_header: str, original_caption: str) -> str:
@@ -35,6 +38,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     Webhook to receive updates from Telegram:
     - callback_query: approve/reject inline button presses
     - message with /start <token>: Telegram bot connection flow
+    - any other private message, and dir_* buttons: Yeison, the Director (panel_backend)
     """
     if settings.telegram_webhook_secret:
         incoming_secret = request.headers.get(_TELEGRAM_SECRET_HEADER, "")
@@ -66,6 +70,15 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
                 message_id=message_id,
                 original_caption=original_caption,
             )
+        elif callback_data.startswith(_DIRECTOR_CALLBACK_PREFIX) and chat_id:
+            background_tasks.add_task(
+                _forward_director_callback,
+                telegram_user_id=(callback_query.get("from") or {}).get("id"),
+                chat_id=str(chat_id),
+                message_id=message_id,
+                original_text=message.get("text", ""),
+                data=callback_data,
+            )
 
     elif "message" in update_data:
         message = update_data["message"]
@@ -73,7 +86,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         chat_id = message.get("chat", {}).get("id")
 
         # Deep-link connect: Telegram sends "/start {token}" as the message text.
-        # Split on the first space — if no token present (plain /start), ignore.
+        # Split on the first space; a plain /start (no token) gets the Director's welcome.
         if text.startswith("/start") and chat_id:
             parts = text.split(" ", 1)
             token = parts[1].strip() if len(parts) > 1 else ""
@@ -89,6 +102,14 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
                 )
             elif token:
                 background_tasks.add_task(_process_connect_start, token=token, chat_id=str(chat_id))
+            elif _is_private(message):
+                background_tasks.add_task(_forward_to_director, telegram_user_id=(message.get("from") or {}).get("id"),
+                                          chat_id=str(chat_id), text=text)
+        elif text and chat_id and _is_private(message):
+            # Everything else a person writes to the bot goes to Yeison, the Director (Y-33).
+            # Group chats (the supervisor's) only use buttons, so they are not answered.
+            background_tasks.add_task(_forward_to_director, telegram_user_id=(message.get("from") or {}).get("id"),
+                                      chat_id=str(chat_id), text=text)
 
     return {"status": "ok"}
 
@@ -177,6 +198,71 @@ async def _process_member_connect(token: str, chat_id: str, telegram_user_id, us
         await _send_telegram_message(chat_id, "⚠️ Error interno al vincular. Intenta de nuevo.")
 
 
+def _is_private(message: dict) -> bool:
+    return (message.get("chat") or {}).get("type") == "private"
+
+
+async def _ask_director(path: str, body: dict) -> Optional[dict]:
+    """POST to the panel's Director; None (and a log line) when it cannot answer."""
+    if not settings.backend_api_url or not settings.backend_api_key:
+        logger.error("director_missing_backend_config")
+        return None
+    url = f"{settings.backend_api_url.rstrip('/')}/internal/director/{path}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=body, headers={"x-internal-key": settings.backend_api_key})
+        if response.status_code == 200:
+            return response.json()
+        logger.error("director_unexpected_status", path=path, status=response.status_code, body=response.text[:200])
+    except Exception as e:
+        logger.error("director_request_failed", path=path, error=str(e))
+    return None
+
+
+def _inline_keyboard(buttons: list) -> Optional[dict]:
+    if not buttons:
+        return None
+    return {"inline_keyboard": [[{"text": b["text"], "callback_data": b["callback_data"]} for b in row]
+                                for row in buttons]}
+
+
+async def _forward_to_director(telegram_user_id, chat_id: str, text: str) -> None:
+    if not telegram_user_id:
+        return
+    answer = await _ask_director("message", {"telegram_user_id": telegram_user_id, "chat_id": chat_id, "text": text})
+    if answer is None:
+        await _send_telegram_message(chat_id, "⚠️ No pude responder ahora. Intenta de nuevo en un momento.")
+        return
+    await _send_telegram_message(chat_id, answer["text"], reply_markup=_inline_keyboard(answer.get("buttons")))
+
+
+async def _forward_director_callback(telegram_user_id, chat_id: str, message_id: int, original_text: str,
+                                     data: str) -> None:
+    """Confirmar / Cancelar of a Director action: apply it and replace the buttons with the result."""
+    if not telegram_user_id:
+        return
+    answer = await _ask_director("callback", {"telegram_user_id": telegram_user_id, "chat_id": chat_id, "data": data})
+    result = answer["text"] if answer else "⚠️ No pude procesar el botón. Intenta de nuevo."
+    combined = f"{original_text}\n\n{result}".strip()
+    if not message_id or not await _replace_text_message(chat_id, message_id, combined):
+        await _send_telegram_message(chat_id, result)
+
+
+async def _replace_text_message(chat_id: str, message_id: int, text: str) -> bool:
+    """Edit a plain-text bot message and drop its buttons. False if Telegram refused."""
+    if not settings.telegram_bot_token:
+        return False
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/editMessageText"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": text[:4096],
+                                                    "reply_markup": {"inline_keyboard": []}})
+        return response.status_code == 200
+    except Exception as e:
+        logger.error("telegram_edit_text_failed", error=str(e))
+        return False
+
+
 async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> None:
     """Ask panel_backend to record the SALE_EXIT movements of a sale. Failures are logged, never raised."""
     if not settings.backend_api_url or not settings.backend_api_key:
@@ -199,13 +285,16 @@ async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> Non
         logger.error("stock_exit_request_failed", sale_id=sale_id, error=str(e))
 
 
-async def _send_telegram_message(chat_id: str, text: str) -> None:
+async def _send_telegram_message(chat_id: str, text: str, reply_markup: Optional[dict] = None) -> None:
     if not settings.telegram_bot_token:
         return
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(url, json={"chat_id": chat_id, "text": text})
+            await client.post(url, json=payload)
     except Exception as e:
         logger.error("telegram_send_message_failed", error=str(e))
 

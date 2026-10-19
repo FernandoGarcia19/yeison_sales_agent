@@ -1,3 +1,4 @@
+import base64
 from typing import Optional
 
 from fastapi import APIRouter, Request, BackgroundTasks, HTTPException
@@ -38,7 +39,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     Webhook to receive updates from Telegram:
     - callback_query: approve/reject inline button presses
     - message with /start <token>: Telegram bot connection flow
-    - any other private message, and dir_* buttons: Yeison, the Director (panel_backend)
+    - any other private message, photo included, and dir_* buttons: Yeison, the Director (panel_backend)
     """
     if settings.telegram_webhook_secret:
         incoming_secret = request.headers.get(_TELEGRAM_SECRET_HEADER, "")
@@ -110,6 +111,12 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
             # Group chats (the supervisor's) only use buttons, so they are not answered.
             background_tasks.add_task(_forward_to_director, telegram_user_id=(message.get("from") or {}).get("id"),
                                       chat_id=str(chat_id), text=text)
+        elif chat_id and _is_private(message) and _image_file(message):
+            # A photo of an invoice: the Director reads it and proposes the expense (Y-39)
+            file_id, mime_type = _image_file(message)
+            background_tasks.add_task(_forward_photo_to_director,
+                                      telegram_user_id=(message.get("from") or {}).get("id"), chat_id=str(chat_id),
+                                      file_id=file_id, mime_type=mime_type, caption=message.get("caption") or "")
 
     return {"status": "ok"}
 
@@ -232,6 +239,55 @@ async def _forward_to_director(telegram_user_id, chat_id: str, text: str) -> Non
     answer = await _ask_director("message", {"telegram_user_id": telegram_user_id, "chat_id": chat_id, "text": text})
     if answer is None:
         await _send_telegram_message(chat_id, "⚠️ No pude responder ahora. Intenta de nuevo en un momento.")
+        return
+    await _send_telegram_message(chat_id, answer["text"], reply_markup=_inline_keyboard(answer.get("buttons")))
+
+
+_MAX_PHOTO_BYTES = 8 * 1024 * 1024
+
+
+def _image_file(message: dict) -> Optional[tuple]:
+    """(file_id, mime type) of a photo, or of an image sent as a file; None otherwise."""
+    photos = message.get("photo") or []
+    if photos:
+        return photos[-1]["file_id"], "image/jpeg"  # Telegram lists sizes from small to large
+    document = message.get("document") or {}
+    if (document.get("mime_type") or "") in ("image/jpeg", "image/png", "image/webp"):
+        return document["file_id"], document["mime_type"]
+    return None
+
+
+async def _download_telegram_file(file_id: str) -> Optional[bytes]:
+    if not settings.telegram_bot_token:
+        return None
+    base = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            info = (await client.get(f"{base}/getFile", params={"file_id": file_id})).json()
+            path = (info.get("result") or {}).get("file_path")
+            if not path or (info["result"].get("file_size") or 0) > _MAX_PHOTO_BYTES:
+                return None
+            response = await client.get(f"https://api.telegram.org/file/bot{settings.telegram_bot_token}/{path}")
+        return response.content if response.status_code == 200 else None
+    except Exception as e:
+        logger.error("telegram_file_download_failed", error=str(e))
+        return None
+
+
+async def _forward_photo_to_director(telegram_user_id, chat_id: str, file_id: str, mime_type: str,
+                                     caption: str) -> None:
+    if not telegram_user_id:
+        return
+    image = await _download_telegram_file(file_id)
+    if image is None:
+        await _send_telegram_message(chat_id, "⚠️ No pude descargar la foto. Envíala de nuevo, por favor.")
+        return
+    await _send_telegram_message(chat_id, "🔎 Leyendo la factura…")
+    answer = await _ask_director("photo", {"telegram_user_id": telegram_user_id, "chat_id": chat_id,
+                                           "image_base64": base64.b64encode(image).decode(),
+                                           "mime_type": mime_type, "caption": caption[:1024]})
+    if answer is None:
+        await _send_telegram_message(chat_id, "⚠️ No pude leer la factura ahora. Intenta de nuevo en un momento.")
         return
     await _send_telegram_message(chat_id, answer["text"], reply_markup=_inline_keyboard(answer.get("buttons")))
 

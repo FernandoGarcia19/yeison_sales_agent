@@ -103,3 +103,28 @@ async def test_panel_down_still_answers(captured, monkeypatch):
     monkeypatch.setattr(tw.httpx, "AsyncClient", broken)
     await _post(_message("/ventas"))
     assert "No pude responder" in captured["sent"][0][1]
+
+
+async def test_invoice_photo_is_downloaded_and_sent_to_the_director(captured, monkeypatch):
+    async def fake_download(file_id):
+        assert file_id == "big"  # the largest size
+        return b"jpeg-bytes"
+
+    monkeypatch.setattr(tw, "_download_telegram_file", fake_download)
+    captured["answer"] = {"text": "🧾 ¿Registro este gasto?", "linked": True,
+                          "buttons": [[{"text": "✅ Confirmar", "callback_data": "dir_ok_cd"}]]}
+    update = {"update_id": 3, "message": {"message_id": 10, "chat": {"id": 555, "type": "private"}, "from": {"id": 555},
+                                          "caption": "embalaje", "photo": [{"file_id": "small"}, {"file_id": "big"}]}}
+    assert (await _post(update)).status_code == 200
+    url, _, body = captured["panel"][0]
+    assert url == "http://panel/api/v1/internal/director/photo"
+    assert body["image_base64"] == "anBlZy1ieXRlcw==" and body["caption"] == "embalaje"
+    assert captured["sent"][0][1] == "🔎 Leyendo la factura…"
+    assert captured["sent"][1][2] == {"inline_keyboard": [[{"text": "✅ Confirmar", "callback_data": "dir_ok_cd"}]]}
+
+
+async def test_photos_in_groups_are_ignored(captured):
+    update = {"update_id": 4, "message": {"message_id": 11, "chat": {"id": -100, "type": "group"}, "from": {"id": 1},
+                                          "photo": [{"file_id": "x"}]}}
+    await _post(update)
+    assert captured["panel"] == [] and captured["sent"] == []

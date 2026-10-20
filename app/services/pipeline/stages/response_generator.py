@@ -11,6 +11,7 @@ from app.services.pipeline.base import BasePipelineStage
 from app.integrations.whatsapp.client import send_whatsapp_message
 from app.core.config import settings
 from app.services import llm_usage
+from app.services.pipeline.llm_models import model_for, request_options
 
 
 class ResponseGeneratorStage(BasePipelineStage):
@@ -127,7 +128,7 @@ class ResponseGeneratorStage(BasePipelineStage):
         user_prompt = self._build_user_prompt(context)
         
         client = self._get_client()
-        model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+        model = model_for("response")
         
         response = await client.chat.completions.create(
             model=model,
@@ -136,7 +137,7 @@ class ResponseGeneratorStage(BasePipelineStage):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=settings.openai_temperature,
-            extra_body={"max_completion_tokens": settings.openai_max_tokens}
+            extra_body=request_options(context, "response", max_completion_tokens=settings.openai_max_tokens)
         )
         llm_usage.record(context, "sales.response", model, response)
         

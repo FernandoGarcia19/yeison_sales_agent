@@ -76,6 +76,10 @@ class BasePipelineStage(ABC):
         """Helper method for logging info."""
         self.logger.info(message, **kwargs)
     
+    def log_warning(self, message: str, **kwargs):
+        """Helper method for logging warnings."""
+        self.logger.warning(message, **kwargs)
+
     def log_error(self, message: str, **kwargs):
         """Helper method for logging errors."""
         self.logger.error(message, **kwargs)

@@ -12,6 +12,7 @@ from langgraph.graph import StateGraph, END
 
 from app.core.config import settings
 from app.services import llm_usage
+from app.services.pipeline.llm_models import model_for, request_options
 from app.schemas.pipeline import PipelineContext, PipelineResult, PipelineStage as PipelineStageEnum
 from app.services.pipeline.base import BasePipelineStage, PipelineStageError
 
@@ -261,7 +262,7 @@ class PipelineRunner:
 
         try:
             client = self._get_client()
-            model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+            model = model_for("decision")
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
@@ -269,7 +270,7 @@ class PipelineRunner:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.2,
-                extra_body={"max_completion_tokens": 200},
+                extra_body=request_options(context, "decision", max_completion_tokens=200),
                 response_format={"type": "json_object"}
             )
             llm_usage.record(context, "sales.decision", model, response)

@@ -17,6 +17,7 @@ from app.models import Lead, SalesConversation
 from app.core.database import get_session_factory
 from app.core.config import settings
 from app.services import llm_usage
+from app.services.pipeline.llm_models import model_for, request_options
 
 
 class ActionExecutorStage(BasePipelineStage):
@@ -533,12 +534,12 @@ class ActionExecutorStage(BasePipelineStage):
 
         try:
             client = self._get_client()
-            model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+            model = model_for("checkout_extraction")
             response = await client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                extra_body={"max_completion_tokens": 200},
+                extra_body=request_options(context, "checkout_extraction", max_completion_tokens=200),
                 response_format={"type": "json_object"},
             )
             llm_usage.record(context, "sales.checkout_extraction", model, response)
@@ -583,12 +584,12 @@ class ActionExecutorStage(BasePipelineStage):
 
         try:
             client = self._get_client()
-            model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+            model = model_for("item_extraction")
             response = await client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                extra_body={"max_completion_tokens": 200},
+                extra_body=request_options(context, "item_extraction", max_completion_tokens=200),
                 response_format={"type": "json_object"},
             )
             llm_usage.record(context, "sales.item_extraction", model, response)

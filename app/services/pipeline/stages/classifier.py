@@ -10,6 +10,7 @@ from app.schemas.pipeline import PipelineContext, IntentType
 from app.services.pipeline.base import BasePipelineStage, ClassificationError
 from app.core.config import settings
 from app.services import llm_usage
+from app.services.pipeline.llm_models import model_for, request_options
 
 
 class ClassificationStage(BasePipelineStage):
@@ -202,7 +203,7 @@ Responde con el JSON de clasificación."""
         client = self._get_client()
         
         # Select model based on configuration
-        model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+        model = model_for("classification")
         
         try:
             response = await client.chat.completions.create(
@@ -212,7 +213,7 @@ Responde con el JSON de clasificación."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3,
-                extra_body={"max_completion_tokens": 200},
+                extra_body=request_options(context, "classification", max_completion_tokens=200),
                 response_format={"type": "json_object"}
             )
             llm_usage.record(context, "sales.classification", model, response)

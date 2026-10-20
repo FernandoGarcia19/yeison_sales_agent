@@ -19,6 +19,7 @@ from app.services.pipeline.base import BasePipelineStage, PipelineStageError
 from app.services.pipeline.stages.validator import ValidationStage
 from app.services.pipeline.stages.identifier import IdentificationStage
 from app.services.pipeline.stages.classifier import ClassificationStage
+from app.services.pipeline.stages.usage_gate import UsageGateStage
 from app.services.pipeline.stages.context_builder import ContextBuilderStage
 from app.services.pipeline.stages.action_executor import ActionExecutorStage
 from app.services.pipeline.stages.response_generator import ResponseGeneratorStage
@@ -47,6 +48,7 @@ class PipelineRunner:
 
         self._validation_stage = ValidationStage()
         self._identification_stage = IdentificationStage()
+        self._usage_gate_stage = UsageGateStage()
         self._classification_stage = ClassificationStage()
         self._context_builder_stage = ContextBuilderStage()
         self._action_stage = ActionExecutorStage()
@@ -55,6 +57,7 @@ class PipelineRunner:
         self._tool_stages: List[BasePipelineStage] = [
             self._validation_stage,
             self._identification_stage,
+            self._usage_gate_stage,
             self._classification_stage,
             self._context_builder_stage,
             self._action_stage,
@@ -63,6 +66,7 @@ class PipelineRunner:
         self._stage_mapping = {
             "ValidationStage": PipelineStageEnum.VALIDATION,
             "IdentificationStage": PipelineStageEnum.IDENTIFICATION,
+            "UsageGateStage": PipelineStageEnum.IDENTIFICATION,
             "ClassificationStage": PipelineStageEnum.CLASSIFICATION,
             "ContextBuilderStage": PipelineStageEnum.CONTEXT_BUILDING,
             "ActionExecutorStage": PipelineStageEnum.ACTION_EXECUTION,
@@ -208,6 +212,9 @@ class PipelineRunner:
             context.current_stage = self._stage_mapping.get(stage.__class__.__name__)
             context = await stage.execute(context)
 
+            if context.halted:
+                self.logger.info("pipeline_halted", message_sid=context.message_sid, reason=context.halted)
+                break
             if context.error:
                 self.logger.warning(
                     "pipeline_stopped_early",
@@ -222,7 +229,7 @@ class PipelineRunner:
     async def _response_node(self, state: GraphState) -> GraphState:
         context = state["context"]
 
-        if context.error:
+        if context.error or context.halted:  # a halted turn already answered (or must not)
             return {"context": context}
 
         context.current_stage = PipelineStageEnum.RESPONSE_GENERATION
@@ -253,9 +260,15 @@ class PipelineRunner:
         # side-effects (e.g. sending the QR code twice).
         if context.action_result is not None:
             return "respond", "Action already executed."
+        if context.halted:
+            return "respond", f"Turn halted: {context.halted}."
 
-        system_prompt, user_prompt = self._build_reasoning_prompts(context)
+        # Without the tenant, conversation, intent or action the answer is always "use_tool":
+        # asking the model first only spent a call per turn (and before identification it was not recorded)
         required_missing = self._missing_required_context(context)
+        if required_missing:
+            return "use_tool", "Falta contexto operativo para responder."
+        system_prompt, user_prompt = self._build_reasoning_prompts(context)
 
         decision = "use_tool" if required_missing else "respond"
         summary = ""

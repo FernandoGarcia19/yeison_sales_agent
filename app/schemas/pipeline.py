@@ -118,6 +118,7 @@ class PipelineContext(BaseModel):
     started_at: datetime = Field(default_factory=datetime.utcnow, description="Pipeline start time")
     current_stage: Optional[PipelineStage] = Field(None, description="Current processing stage")
     error: Optional[str] = Field(None, description="Error message if pipeline fails")
+    halted: Optional[str] = Field(None, description="Turn stopped before the models: plan_limit or rate_limited (Y-17)")
     
     class Config:
         use_enum_values = True

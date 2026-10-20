@@ -10,6 +10,7 @@ from app.schemas.pipeline import PipelineContext, IntentType
 from app.services.pipeline.base import BasePipelineStage
 from app.integrations.whatsapp.client import send_whatsapp_message
 from app.core.config import settings
+from app.services import llm_usage
 
 
 class ResponseGeneratorStage(BasePipelineStage):
@@ -137,6 +138,7 @@ class ResponseGeneratorStage(BasePipelineStage):
             temperature=settings.openai_temperature,
             extra_body={"max_completion_tokens": settings.openai_max_tokens}
         )
+        llm_usage.record(context, "sales.response", model, response)
         
         response_text = response.choices[0].message.content.strip()
         

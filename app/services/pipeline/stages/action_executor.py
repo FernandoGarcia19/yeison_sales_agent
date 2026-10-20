@@ -855,15 +855,22 @@ class ActionExecutorStage(BasePipelineStage):
         try:
             import mimetypes
             from datetime import timezone
-            from app.services.media_downloader import download_twilio_media
+            from app.services.media_downloader import download_whatsapp_media
             from app.services import r2_storage
             from app.services import telegram_service
             from app.core.config import settings
+            from app.services.whatsapp_connections import get_whatsapp_connection_for_phone
 
             proof_twilio_url = context.media_urls[0]
+            connection = await get_whatsapp_connection_for_phone(context.recipient_phone)
+            provider = (connection or {}).get("provider") or "evolution"
 
-            # 1. Download from Twilio
-            file_bytes, content_type = await download_twilio_media(proof_twilio_url)
+            # 1. Download from the configured WhatsApp provider
+            file_bytes, content_type = await download_whatsapp_media(
+                proof_twilio_url,
+                provider=provider,
+                agent_phone=context.recipient_phone,
+            )
 
             # 2. Upload to R2
             ext = (mimetypes.guess_extension(content_type) or ".bin").lstrip(".")

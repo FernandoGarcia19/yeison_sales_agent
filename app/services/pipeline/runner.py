@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from langgraph.graph import StateGraph, END
 
 from app.core.config import settings
+from app.services import llm_usage
 from app.schemas.pipeline import PipelineContext, PipelineResult, PipelineStage as PipelineStageEnum
 from app.services.pipeline.base import BasePipelineStage, PipelineStageError
 
@@ -271,6 +272,7 @@ class PipelineRunner:
                 extra_body={"max_completion_tokens": 200},
                 response_format={"type": "json_object"}
             )
+            llm_usage.record(context, "sales.decision", model, response)
 
             result_text = response.choices[0].message.content.strip()
             result = json.loads(result_text)

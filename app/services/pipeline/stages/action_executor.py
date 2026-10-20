@@ -16,6 +16,7 @@ from app.services.notification_service import NotificationService
 from app.models import Lead, SalesConversation
 from app.core.database import get_session_factory
 from app.core.config import settings
+from app.services import llm_usage
 
 
 class ActionExecutorStage(BasePipelineStage):
@@ -177,7 +178,7 @@ class ActionExecutorStage(BasePipelineStage):
         # first turn of this purchase intent so we don't overwrite a stored cart.
         if not context.cart_contents.get("items"):
             extracted = await self._extract_purchase_items(
-                context.message_body, context.conversation_history, context.relevant_products
+                context.message_body, context.conversation_history, context.relevant_products, context=context
             )
             selected = []
             for entry in extracted:
@@ -514,6 +515,7 @@ class ActionExecutorStage(BasePipelineStage):
         message: str,
         required_fields: List[str],
         already_collected: dict,
+        context: Optional[PipelineContext] = None,
     ) -> dict:
         """Use LLM to extract checkout fields present in the user's message."""
         missing = [f for f in required_fields if not already_collected.get(f)]
@@ -539,6 +541,7 @@ class ActionExecutorStage(BasePipelineStage):
                 extra_body={"max_completion_tokens": 200},
                 response_format={"type": "json_object"},
             )
+            llm_usage.record(context, "sales.checkout_extraction", model, response)
             result = json.loads(response.choices[0].message.content.strip())
             return {k: v for k, v in result.items() if k in required_fields and v}
         except Exception as e:
@@ -550,6 +553,7 @@ class ActionExecutorStage(BasePipelineStage):
         message: str,
         conversation_history: list,
         available_products: list,
+        context: Optional[PipelineContext] = None,
     ) -> list:
         """Use LLM to identify which products (and quantities) the user wants to buy."""
         if not available_products or not message.strip():
@@ -587,6 +591,7 @@ class ActionExecutorStage(BasePipelineStage):
                 extra_body={"max_completion_tokens": 200},
                 response_format={"type": "json_object"},
             )
+            llm_usage.record(context, "sales.item_extraction", model, response)
             result = json.loads(response.choices[0].message.content.strip())
             return result.get("items", [])
         except Exception as e:
@@ -646,7 +651,7 @@ class ActionExecutorStage(BasePipelineStage):
         required_fields = self._get_checkout_requirements(context)
 
         extracted = await self._extract_checkout_fields(
-            context.message_body, required_fields, context.checkout_data
+            context.message_body, required_fields, context.checkout_data, context=context
         )
         if extracted:
             context.checkout_data.update(extracted)

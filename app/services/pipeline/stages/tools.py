@@ -1,10 +1,9 @@
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
-from sqlalchemy import select, update
+from sqlalchemy import select
 from app.core.database import get_session_factory
 from app.models import InventoryTenant, ConfigurationTenant, AgentInstance, Lead, SalesConversation
-from app.core.redis_client import cache_get, cache_set, build_inventory_cache_key, build_agent_cache_key
 
 class GetTenantInventoryInput(BaseModel):
     tenant_id: int = Field(..., description="The unique identifier of the tenant/business.")

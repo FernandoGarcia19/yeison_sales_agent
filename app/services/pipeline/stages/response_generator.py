@@ -238,7 +238,7 @@ INFORMACIÓN DE LA EMPRESA:
 """
         
         if contact_info and any(contact_info.values()):
-            system_prompt += f"""
+            system_prompt += """
 INFORMACIÓN DE CONTACTO:"""
             if contact_info.get('name'):
                 system_prompt += f"\n- Contacto: {contact_info.get('name')}"
@@ -381,13 +381,13 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
         if context.lead_info:
             lead_name = context.lead_info.get('name', '')
             if lead_name:
-                prompt += f"INFORMACIÓN DEL CLIENTE:\n"
+                prompt += "INFORMACIÓN DEL CLIENTE:\n"
                 prompt += f"Nombre: {lead_name}\n"
                 prompt += f"Estado: {context.lead_info.get('status', 'nuevo')}\n\n"
         
         # Add action result if available
         if context.action_result:
-            prompt += f"RESULTADO DE ACCIÓN EJECUTADA:\n"
+            prompt += "RESULTADO DE ACCIÓN EJECUTADA:\n"
             prompt += f"Acción: {context.action_type}\n"
             prompt += f"Resultado: {json.dumps(context.action_result, ensure_ascii=False)}\n\n"
         
@@ -456,7 +456,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         if len(context.conversation_history) == 0:
             return f"¡Hola! Soy {agent_name}, tu asistente de ventas. ¿En qué puedo ayudarte hoy?"
         else:
-            return f"¡Hola de nuevo! ¿En qué más puedo ayudarte?"
+            return "¡Hola de nuevo! ¿En qué más puedo ayudarte?"
     
     def _product_inquiry_response(self, context: PipelineContext) -> str:
         """Generate product inquiry response."""

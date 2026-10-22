@@ -2,7 +2,7 @@
 Lead model - represents a sales lead/prospect.
 """
 
-from typing import Optional, List, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 from datetime import datetime
 from sqlalchemy import String, BigInteger, ForeignKey, Integer, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship

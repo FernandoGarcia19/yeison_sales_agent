@@ -5,7 +5,6 @@ SalesConversation model - represents an ongoing conversation with a customer.
 import enum
 from typing import TYPE_CHECKING, List, Dict, Any, Optional
 from sqlalchemy import String, BigInteger, ForeignKey, JSON
-from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, ActiveMixin

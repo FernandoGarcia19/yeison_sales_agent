@@ -1,0 +1,8 @@
+# Lint in CI (Y-27): syntax errors and pyflakes (unused imports, undefined names, ...).
+# Widen it rule by rule; each new rule lands with the code already fixed.
+target-version = "py311"
+# Reference text written as Python, never imported (and not valid Python); Y-29 decides its fate
+extend-exclude = ["app/config_examples.py"]
+
+[lint]
+select = ["E9", "F"]

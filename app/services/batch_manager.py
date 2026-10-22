@@ -264,7 +264,6 @@ async def get_queue_status(agent_phone: str, user_phone: str) -> Dict[str, Any]:
         Dictionary with queue status
     """
     queue_key = build_batch_queue_key(agent_phone, user_phone)
-    lock_key = build_batch_lock_key(agent_phone, user_phone)
     timer_id = f"{agent_phone}:{user_phone}"
     
     queue_length = await list_length(queue_key)

@@ -23,7 +23,6 @@ from app.schemas.pipeline import PipelineContext
 from app.schemas.webhook import TwilioWebhookRequest, WhatsAppWebhookRequest
 from app.services.batch_manager import enqueue_message
 from app.services.pipeline.runner import PipelineRunner
-from app.services.whatsapp_connections import get_whatsapp_connection_for_instance, get_whatsapp_connection_for_phone
 
 logger = structlog.get_logger()
 

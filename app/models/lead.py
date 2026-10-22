@@ -4,7 +4,7 @@ Lead model - represents a sales lead/prospect.
 
 from typing import Optional, TYPE_CHECKING
 from datetime import datetime
-from sqlalchemy import String, BigInteger, ForeignKey, Integer, DateTime, JSON
+from sqlalchemy import String, Text, BigInteger, ForeignKey, Integer, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, ActiveMixin
@@ -47,11 +47,11 @@ class Lead(Base, TimestampMixin, ActiveMixin):
     source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="new")
     score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    notes: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     lead_metadata: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)
     last_contact: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     converted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    receipt_object_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    receipt_object_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     conversation_id: Mapped[Optional[int]] = mapped_column(
         BigInteger,
         ForeignKey("sales_conversation.id"),

@@ -3,7 +3,8 @@ name: CI
 # Lint and tests on every PR (and every push to staging), on the Python of the image (Y-27).
 # The tests run against a Postgres with the real schema: yeison_migrations is checked out with a
 # read-only deploy key (secret MIGRATIONS_READ_KEY) and upgraded to head, on the same branch
-# name as this PR's base (staging or main).
+# name as this PR's base (staging or main). Its tools/schema_contract.py then checks that these
+# models hold against that schema (Y-28).
 on:
   pull_request:
     branches: [staging, main]
@@ -62,6 +63,11 @@ jobs:
         run: alembic upgrade head
       - name: Lint
         run: ruff check --output-format=github --exclude _migrations .
+      - name: Schema contract (Y-28)
+        env:
+          SCHEMA_DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/yeison_test
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/yeison_test
+        run: python _migrations/tools/schema_contract.py schema_contract.toml
       - name: Tests
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/yeison_test

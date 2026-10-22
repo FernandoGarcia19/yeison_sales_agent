@@ -1,425 +1,142 @@
 # yeison_sales_agent
-# WhatsApp AI Sales Agent - Multitenant Architecture
 
-## Project Overview
+El vendedor de Yeison por WhatsApp. Recibe los mensajes de los clientes de cada negocio, consulta el inventario, arma el
+carrito, cobra (QR o pago en persona) y le avisa al supervisor por Telegram, que aprueba o rechaza el comprobante. Al
+aprobar, registra la venta y descuenta el stock. También recibe el webhook del bot de Telegram y le pasa al panel lo que
+es para el Director.
 
-This is a **multitenant WhatsApp AI Sales Agent** that processes incoming WhatsApp messages through Twilio webhooks and executes a multi-step workflow to handle sales conversations for multiple businesses simultaneously.
+FastAPI · LangGraph/LangChain · OpenAI (u OpenRouter) · Redis (agrupa mensajes y cachea) · SQLAlchemy async ·
+Evolution API (WhatsApp) · Cloudflare R2 (comprobantes y QR). Python 3.11.
 
-**Key Principle**: This service focuses on **workflow execution only**. All CRUD operations for Tenant, Agent, Inventory, and Lead are handled by a separate main backend system.
+Puerto: 8000 al correrlo con `python main.py`, 8090 en el contenedor de producción y 8091 en el de staging. En la VPS,
+nginx lo publica bajo `/agent/`.
 
-**Multitenant**: Each business (tenant) has its own WhatsApp number, configuration, inventory, and conversations. Data is completely isolated between tenants.
-
-## Architecture
-
-### High-Level Flow
-
-```
-WhatsApp → Twilio → Webhook → Tenant Identification → Batch Queue (Redis) → Pipeline → WhatsApp Response
-                         ↓              ↓                      ↓                  ↓
-                    Agent Phone    Tenant Context        Wait 3s for        Database (read)
-                    Lookup         Configuration         more messages      Redis (cache)
-                                                                             Main Backend API (mutations)
-```
-
-### Multitenant Flow
-
-When a message arrives:
-
-1. **Phone Number Received**: Twilio webhook receives `From` (customer) and `To` (business WhatsApp number)
-2. **Tenant Identification**: System looks up which tenant owns the `To` number via `agent_instance` table
-3. **Context Loading**: Load tenant-specific configuration, inventory, and conversation history
-4. **Processing**: Pipeline processes with tenant context
-5. **Response**: Send response from the correct business WhatsApp number
-
-**Example**:
-- Customer sends to `+591766990995` (Zapatería El Paso) → System uses Tenant ID 1's inventory and config
-- Customer sends to `+591777123456` (Tech Store) → System uses Tenant ID 2's inventory and config
-- Conversations are completely isolated between tenants
-
-### Message Batching
-
-The system implements intelligent message batching to handle rapid-fire messages from users:
-
-- **Wait Window**: When a message arrives, the system waits 3 seconds to collect additional messages
-- **Smart Processing**: Multiple messages from the same user are processed together as a single context
-- **Early Firing**: If 5+ messages arrive before the 3-second window, processing happens immediately
-- **Context Preservation**: All messages are saved individually in history, but AI generates one contextual response
-
-**Example**: User sends "Hola" followed by "Quiero comprar zapatos" within 1 second → AI sees both messages as context and generates one relevant response about shoe products.
-
-**Configuration**:
-- `BATCH_ENABLED=true` - Enable/disable message batching
-- `BATCH_WINDOW_SECONDS=3` - Wait time to collect messages
-- `BATCH_MAX_MESSAGES=5` - Max messages before firing early
-
-### Pipeline Stages
-
-The agent processes each message through a dynamically orchestrated pipeline, powered by a ReAct (Reasoning and Acting) graph, rather than rigid sequential steps. 
-
-1. **Validation** - Validates message format and content
-2. **Identification** - Identifies tenant, agent instance, and conversation
-3. **ReasoningNode / Context Building** - Replaces the old rigid "Classification/Context" stages. Uses a LangGraph-based `ReasoningNode` that evaluates the user's input and intelligently invokes Langchain tools *on-demand* to fetch exactly what it needs:
-   - `get_tenant_inventory`: Queries PostgreSQL for product pricing and availability.
-   - `get_tenant_policies`: Retrieves business hours, delivery rules, and sales processes.
-   - `get_lead_info`: Checks for prior lead history or score.
-4. **Action Execution** - Executes any final CRM mutations or system actions based on the ReasoningNode's finalized intent.
-5. **Response Generation** - The LLM synthesizes the tool outputs and conversation history into a natural WhatsApp response.
-
-## Project Structure
+## Cómo fluye un mensaje
 
 ```
-yeison_sales_agent/
-├── app/
-│   ├── api/
-│   │   └── v1/
-│   │       └── webhooks.py          # Twilio webhook endpoint
-│   ├── core/
-│   │   ├── config.py                # Configuration settings
-│   │   ├── database.py              # Database session management
-│   │   └── redis_client.py          # Redis caching + batch queue
-│   ├── integrations/
-│   │   └── whatsapp/
-│   │       ├── client.py            # WhatsApp message sender
-│   │       └── validator.py         # Twilio signature validation
-│   ├── models/
-│   │   ├── tenant.py                # Tenant model (read-only)
-│   │   ├── agent_instance.py        # AgentInstance model
-│   │   ├── inventory.py             # InventoryTenant model
-│   │   ├── lead.py                  # Lead model (read-only)
-│   │   └── conversation.py          # SalesConversation model
-│   ├── schemas/
-│   │   ├── webhook.py               # Twilio webhook schemas
-│   │   ├── message.py               # Message schemas
-│   │   └── pipeline.py              # Pipeline context schemas
-│   └── services/
-│       ├── batch_manager.py         # Message batching service
-│       └── pipeline/
-│           ├── base.py              # Base pipeline stage interface
-│           ├── runner.py            # Pipeline orchestrator
-│           └── stages/
-│               ├── validator.py
-│               ├── identifier.py
-│               ├── classifier.py
-│               ├── context_builder.py
-│               ├── action_executor.py
-│               └── response_generator.py
-├── main.py                          # FastAPI application entry point
-├── requirements.txt                 # Python dependencies
-├── Dockerfile                       # Docker configuration
-└── .env.example                     # Environment variables template
+WhatsApp → Evolution API → POST /api/v1/webhooks/evolution → Redis (agrupa 3 s o 5 mensajes) → pipeline → respuesta por Evolution
 ```
 
-## Database Schema
+1. **Webhook** (`app/api/v1/webhooks.py`): exige el header `x-evolution-webhook-secret`; sin secreto o si no coincide,
+   responde 401. Ignora los mensajes propios (`fromMe`), los grupos y los eventos que no son mensajes. El agente sale de la
+   instancia de Evolution (`whatsapp_connection.evolution_instance_name`); `key.remoteJid` es el cliente. La media cifrada se
+   baja con `/chat/getBase64FromMediaMessage`.
+2. **Agrupado** (`app/services/batch_manager.py`): junta los mensajes de un cliente durante 3 s o hasta 5, y corre el pipeline una vez.
+3. **Pipeline** (`app/services/pipeline/runner.py`, etapas en `stages/`):
+   - validación;
+   - identificación del negocio y del agente;
+   - **tope del plan** (`usage_gate.py`, pregunta al panel);
+   - clasificación;
+   - contexto (configuración, inventario, conversación);
+   - acción (carrito, checkout, pago);
+   - respuesta.
+4. **Estados de la conversación**: `browsing → cart_building → fulfillment_coord → awaiting_payment_method →
+   awaiting_receipt → order_completed` (+ `paused` cuando la toma una persona).
+5. **Pago**: con QR, el cliente manda el comprobante (se guarda en R2) y el supervisor aprueba o rechaza con los botones de
+   Telegram; con pago en persona, la venta queda pendiente. Al aprobar, `app/services/sale_recorder.py` registra la venta
+   en `sale` (QR → `paid`, en persona → `pending`) y el panel descuenta el stock (`/internal/inventory/sale-exit`).
 
-This service reads from an existing PostgreSQL database with the following tables:
+Twilio sigue en el código como respaldo (`POST /api/v1/webhooks/twilio`, `WHATSAPP_PROVIDER_DEFAULT`), con sus credenciales por subcuenta.
 
-### Core Tables
+### Modelos
 
-- **tenant** - Business/organization information
-  - `id`, `name`, `email`, `profile_image`, `active`
-  
-- **agent_instance** - AI agent configurations per tenant
-  - `id`, `tenant_id`, `phone_number` (WhatsApp number), `agent_type`, `configuration` (JSONB)
-  - Unique constraint on `(phone_number, active)` ensures one number = one active agent
-  
-- **sales_conversation** - Conversation state and message history
-  - `id`, `agent_instance_id`, `external_user_id` (customer phone), `lead_id`, `messages` (JSONB)
-  - Unique constraint on `(agent_instance_id, external_user_id, active)` prevents duplicate conversations
-  
-- **lead** - Sales leads/prospects per tenant
-  - `id`, `agent_instance_id`, `tenant_id`, `name`, `email`, `phone`, `status`, `metadata` (JSONB)
-  
-- **inventory_tenant** - Product catalog per tenant
-  - `id`, `tenant_id`, `product_name`, `price`, `quantity`, `description`
+`app/services/pipeline/llm_models.py`: la clasificación, la decisión y las extracciones devuelven un JSON corto y usan
+`OPENAI_SMALL_MODEL` (en staging `gpt-5.4-nano`); la respuesta que lee el cliente usa `OPENAI_MODEL` (por defecto
+`gpt-5.4-mini`). Cada llamada manda `prompt_cache_key=yeison-agent-<id>-<paso>` (`PROMPT_CACHE_ENABLED`) y escribe una fila
+en `llm_usage` (`reference` = id del mensaje).
 
-### Data Isolation
+### Tope del plan y rate limit
 
-All queries **MUST** filter by `tenant_id` to ensure proper multitenant isolation:
+Antes de gastar en el modelo, `UsageGateStage` pregunta al panel (`/internal/usage/sales-gate`, caché de 60 s):
+- hasta el 110 % del tope mensual de turnos, sigue respondiendo;
+- después manda un mensaje fijo de derivación y avisa al supervisor (una vez cada 12 h por cliente);
+- rate limit: 20 turnos por cliente cada 10 min y 300 por negocio por hora.
 
-```python
-# ✅ CORRECT - Tenant-scoped query
-products = await db.execute(
-    select(InventoryTenant).where(
-        InventoryTenant.tenant_id == context.tenant_id,
-        InventoryTenant.active == True
-    )
-)
+### Telegram
 
-# ❌ WRONG - Missing tenant_id filter
-products = await db.execute(
-    select(InventoryTenant).where(InventoryTenant.active == True)
-)
+`POST /api/v1/webhooks/telegram` recibe todo lo del bot compartido. Con `TELEGRAM_WEBHOOK_SECRET` definido (staging lo tiene),
+exige que el header `X-Telegram-Bot-Api-Secret-Token` coincida.
+- **Supervisor**: lo vincula el enlace `{agent_id}_<hex>`; recibe los avisos de pago y de derivación del agente.
+- **Personas del equipo**: las vincula el enlace `m_<hex>`.
+- **Director**: los mensajes privados, los botones `dir_*` y las fotos de facturas se reenvían al panel
+  (`/internal/director/{message,callback,photo}`), y el agente manda la respuesta.
+
+## Configuración del agente (`agent_instance.configuration`)
+
+JSONB que se arma desde el panel. Lo que lee el agente (sin `checkout_requirements`, pide nombre, dirección y NIT):
+
+```json
+{
+  "agent_info": {"name": "Vendedor Demo"},
+  "personality": {
+    "tone": "friendly",
+    "formality_level": "casual",
+    "emoji_usage": "moderate",
+    "response_length": "concise",
+    "brand_voice": "Tienda familiar con más de 20 años…",
+    "custom_phrases": {"greeting": "¡Hola! Soy …", "farewell": "¡Gracias por tu tiempo!"}
+  },
+  "sales_process": {"QR_payment": true, "physical_payment": true, "QR_code": "<clave en R2 de la imagen del QR>"},
+  "checkout_requirements": ["Nombre completo", "Dirección de entrega", "NIT"],
+  "integrations": {"telegram": {"enabled": true, "supervisor_chat_id": "<chat del supervisor>"}},
+  "response_settings": {},
+  "conversation_settings": {}
+}
 ```
 
-### Data Access Pattern
+Los datos del negocio (`tenant_info`, `operations_info`, `product_info`, `business_hours`) salen de `configuration_tenant`
+y se combinan con esto en el contexto.
 
-- **READ**: Direct database queries for tenant, agent, inventory, lead data (always filtered by `tenant_id`)
-- **WRITE**: Only to `sales_conversation` table for conversation state
-- **MUTATIONS**: Via REST API calls to main backend (creating/updating leads, analytics)
-- **CACHING**: Redis cache with tenant-scoped keys (`tenant:{tenant_id}:{resource}`)
+## Variables de entorno
 
-## Key Components
+Las de `.env.example` y `app/core/config.py`:
 
-### 1. Webhook Endpoint (`app/api/v1/webhooks.py`)
+| Grupo | Variables |
+|---|---|
+| Base y caché | `DATABASE_URL` (asyncpg), `DATABASE_POOL_SIZE`, `DATABASE_MAX_OVERFLOW`, `DATABASE_POOL_TIMEOUT`, `REDIS_URL`, `REDIS_TTL` |
+| WhatsApp | `WHATSAPP_PROVIDER_DEFAULT` (`evolution`), `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_WEBHOOK_SECRET`, `EVOLUTION_SEND_TEXT_PATH`, `EVOLUTION_SEND_MEDIA_PATH`; Twilio: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` |
+| IA | `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_SMALL_MODEL`, `PROMPT_CACHE_ENABLED`, `LLM_PRICES`, `OPENAI_TEMPERATURE`, `OPENAI_MAX_TOKENS`, `USE_OPENROUTER`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
+| Panel | `BACKEND_API_URL` (en docker, `http://yeison_backend:8070/api/v1`), `BACKEND_API_KEY` (= `INTERNAL_API_KEY` del panel), `BACKEND_API_TIMEOUT` |
+| Telegram | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` |
+| Otros | `ENCRYPTION_KEY` (credenciales de Twilio por subcuenta), R2 (`r2_storage.py`) |
 
-- Receives POST requests from Twilio
-- Validates Twilio signature for security
-- Enqueues messages to Redis batch queue (if batching enabled)
-- Returns 200 OK immediately (Twilio requires <15s response)
+Nunca commitees un `.env` real.
 
-### 2. Batch Manager (`app/services/batch_manager.py`)
-
-- Manages message queuing and batching logic
-- Implements 3-second wait window with asyncio timers
-- Deduplicates messages using Twilio `message_sid`
-- Fires early if max batch size reached (5 messages)
-- Processes batches through pipeline with combined context
-
-### 3. Pipeline Runner (`app/services/pipeline/runner.py`)
-
-- Orchestrates all 6 pipeline stages
-- Handles errors and logging
-- Tracks processing time and metrics
-- Supports both single and batched message processing
-
-### 4. Pipeline Stages
-
-#### Validation Stage
-- Validates message format
-- Checks required fields
-- Basic spam detection (TODO)
-
-#### Identification Stage
-- Looks up agent instance by phone number
-- Loads tenant configuration
-- Finds or creates conversation
-- Uses Redis caching for performance
-
-#### Classification & Context Building (Now Handled by ReAct / ReasoningNode)
-- **Replaced**: The rigid classification and massive up-front context loading pipeline has been replaced by a sophisticated LangGraph-based `ReasoningNode`.
-- **On-Demand Tool Binding**: Instead of querying PostgreSQL up-front for everything (inventory, tenant config, lead info), the `ReasoningNode` uses LLM tool-calling natively (`llm.bind_tools()`) to fetch data exactly when needed.
-- **Available Tools**:
-  - `get_tenant_inventory`: Queries DB for availability.
-  - `get_tenant_policies`: Retrieves specific rules and schedules.
-  - `get_lead_info`: Checks DB for existing external user records.
-- **Dynamic Context**: Combines multiple message bodies (if batched) and actively reasons about the best next steps, significantly reducing token usage and unnecessary database loads.
-
-#### Action Executor Stage
-- Routes to appropriate action based on intent
-- Executes business logic (check inventory, qualify lead, etc.)
-- **TODO**: Integrate with main backend API for mutations
-
-#### Response Generator Stage
-- Generates natural language response
-- Currently uses template-based responses (placeholder)
-- **TODO**: Implement LLM-based response generation
-- Sends message via Twilio
-- Saves messages to conversation history
-- **Batching**: Saves all user messages individually, then one assistant response
-- Invalidates conversation cache after saving
-
-### 4. Caching Layer (`app/core/redis_client.py`)
-
-- Caches tenant configurations
-- Caches agent instance data
-- Cache keys: `tenant:{id}`, `agent:{id}`, `agent:phone:{number}`
-- Default TTL: 1 hour
-- **Message Batching**:
-  - Redis list operations for message queues
-  - Distributed locks for batch timer coordination
-  - Queue keys: `batch_queue:{agent_phone}:{user_phone}`
-  - Lock keys: `batch_lock:{agent_phone}:{user_phone}`
-
-## Intent Types
-
-The system recognizes these user intents:
-
-- `greeting` - Initial greeting
-- `product_inquiry` - Asking about products
-- `pricing_question` - Asking about prices
-- `availability_check` - Checking product availability
-- `purchase_intent` - Intent to purchase
-- `objection` - Sales objection
-- `complaint` - Customer complaint
-- `support_request` - Support request
-- `closing` - Ending conversation
-- `general_question` - General inquiry
-- `unknown` - Unclassified
-
-## Configuration
-
-Environment variables (see `.env.example`):
+## Correr en local
 
 ```bash
-# Database
-DATABASE_URL=postgresql://user:pass@host:5432/db
-
-# Redis
-REDIS_URL=redis://localhost:6379/0
-
-# Message Batching
-BATCH_ENABLED=true
-BATCH_WINDOW_SECONDS=3
-BATCH_MAX_MESSAGES=5
-
-# Twilio
-TWILIO_ACCOUNT_SID=your_sid
-TWILIO_AUTH_TOKEN=your_token
-TWILIO_PHONE_NUMBER=+14155238886
-
-# OpenAI
-OPENAI_API_KEY=your_key
-OPENAI_MODEL=gpt-5.4-mini
-
-# Main Backend
-BACKEND_API_URL=http://localhost:3000/api
-BACKEND_API_KEY=your_api_key
+pip install -r requirements.txt pytest==8.3.4 pytest-asyncio==0.24.0
 ```
 
-## Next Steps (TODOs)
-
-### High Priority
-
-1. **Implement LLM Integration**
-   - Add OpenAI client in classifier stage
-   - Create prompt templates for intent classification
-   - Implement LLM-based response generation (currently using templates)
-
-2. **Main Backend API Client**
-   - Create HTTP client for main backend
-   - Implement lead creation/update endpoints
-   - Add analytics event tracking
-
-3. **Message Batching Enhancements**
-   - Add monitoring/metrics for batch processing
-   - Implement batch retry logic on failures
-   - Add batch size analytics and optimization
-
-4. **Alembic Migrations**
-   - Set up Alembic for database migrations
-   - Create initial migration from existing schema
-
-### Medium Priority
-
-5. **Advanced Intent Classification**
-   - Fine-tune prompts for better accuracy
-   - Add confidence thresholds
-   - Implement fallback strategies
-
-6. **Conversation State Machine**
-   - Track conversation states (greeting → inquiry → qualification → closing)
-   - Implement context-aware responses
-
-7. **Error Handling & Monitoring**
-   - Add Sentry for error tracking
-   - Implement retry logic
-   - Add Prometheus metrics
-
-### Low Priority
-
-8. **Testing**
-   - Unit tests for pipeline stages
-   - Integration tests for webhook
-   - Mock Twilio responses
-   - Test message batching scenarios
-
-9. **Performance Optimization**
-   - Implement connection pooling
-   - Add rate limiting
-   - Optimize database queries
-
-## Running the Application
-
-### Local Development
+(Con el PR #20 queda `requirements-dev.txt`, que trae también ruff.)
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up environment
-cp .env.example .env
-# Edit .env with your credentials
-
-# Run the server
 python main.py
 ```
 
-### Docker
+Necesita Redis y la base con el esquema de `yeison_migrations`. Para probar con WhatsApp de verdad, Evolution tiene que
+poder llegar a tu webhook (en la práctica se prueba en staging).
 
-```bash
-# Build image
-docker build -t yeison-sales-agent .
+## Modelos y contrato de esquema
 
-# Run container
-docker run -p 8000:8090 --env-file .env yeison-sales-agent
-```
+`app/models/` mapea solo las tablas que usa el agente. Si cambia el esquema, primero va la migración en `yeison_migrations`,
+después el modelo de aquí. El CI corre el contrato de esquema (`schema_contract.toml`) y falla si un modelo mapea algo que
+no existe, con otro tipo, o que rompería un insert.
 
-### Testing Webhook
+## Tests, CI y deploy
 
-```bash
-# Use ngrok to expose local server
-ngrok http 8000
+- `tests/`: unos 30 tests (webhook de Evolution, modelos por paso, `llm_usage`, registro de ventas, Director y enlaces de Telegram, tope
+  del plan). Los que usan la base necesitan `TEST_DATABASE_URL` con el esquema al día.
 
-# Configure Twilio webhook URL:
-# https://your-ngrok-url.ngrok.io/api/v1/webhooks/twilio
-```
+  ```bash
+  TEST_DATABASE_URL=postgresql+asyncpg://test:test@127.0.0.1:55432/yeison_test python -m pytest -q tests
+  ```
 
-## API Endpoints
-
-- `GET /` - Welcome message
-- `GET /health` - Health check
-- `GET /api/v1/webhooks/twilio` - Webhook verification
-- `POST /api/v1/webhooks/twilio` - Receive WhatsApp messages
-
-## 📱 Notificaciones al Supervisor
-
-El sistema incluye notificaciones automáticas al supervisor/encargado cuando ocurren eventos importantes. Ver [NOTIFICACIONES.md](NOTIFICACIONES.md) para documentación completa.
-
-### Eventos que Generan Notificaciones
-
-1. **Venta Completada** 🎉
-   - Se envía cuando el cliente confirma una compra
-   - Incluye detalles del cliente, productos y total
-   - El lead se marca automáticamente como "converted"
-
-2. **Solicitud de Atención Humana** 🚨
-   - Se envía cuando el cliente pide hablar con un humano
-   - Incluye contexto de la conversación
-   - Notificación inmediata para respuesta rápida
-
-### Configuración Rápida
-
-```bash
-# Ver agentes disponibles
-python update_supervisor_config.py --list
-
-# Configurar número de supervisor
-python update_supervisor_config.py --agent-id 3 --supervisor-number +59177123456
-
-# Verificar configuración
-python update_supervisor_config.py --agent-id 3 --show
-```
-
-### Formato del Número
-
-- Debe estar en formato E.164: `+[código país][número]`
-- Ejemplo Bolivia: `+59177123456`
-- Ejemplo Venezuela: `+584121234567`
-
-## Security
-
-- Twilio signature validation on all webhook requests
-- Database connection pooling with pre-ping
-- Redis connection with authentication
-- Non-root Docker user
-- Environment-based secrets
-
-## Logging
-
-- Structured logging with structlog
-- Correlation IDs for tracing
-- Logs include: stage, message_sid, intent, action, processing_time
-
-## License
-
-[Your License Here]
+- `.github/workflows/ci.yml` (llega con el PR #20, que espera el secreto `MIGRATIONS_READ_KEY`), en cada PR a `staging` o
+  `main` y en cada push a `staging`:
+  - Postgres 16;
+  - baja `yeison_migrations` y corre `alembic upgrade head`;
+  - después `ruff`, el contrato de esquema y `pytest`.
+  - Se mergea solo con el check `ci` en verde.
+- `.github/workflows/deploy.yml`, con push a `staging` o `main`: SSH a la VPS, `git pull`, recrea `yeison_<env>_sales_agent` y
+  espera `/health`.

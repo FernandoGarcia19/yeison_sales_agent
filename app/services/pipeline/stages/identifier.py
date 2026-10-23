@@ -7,15 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.base import BasePipelineStage, IdentificationError
-from app.models import AgentInstance, Tenant, SalesConversation, Lead
+from app.models import AgentInstance, SalesConversation, Lead
 from app.core.database import get_session_factory
 from app.core.redis_client import (
     cache_get,
     cache_set,
     build_agent_by_phone_cache_key,
-    build_tenant_cache_key,
     build_agent_cache_key,
-    build_conversation_cache_key,
 )
 
 

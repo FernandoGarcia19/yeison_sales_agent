@@ -3,7 +3,7 @@ Base model class for SQLAlchemy models.
 """
 
 from datetime import datetime
-from sqlalchemy import DateTime, Boolean, Integer
+from sqlalchemy import DateTime, Boolean
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 

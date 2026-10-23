@@ -5,13 +5,12 @@ Action executor stage - executes actions based on intent.
 import json
 from typing import Optional, List
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
 from openai import AsyncOpenAI
 
 from app.schemas.pipeline import PipelineContext, IntentType, ConversationState
-from app.services.pipeline.base import BasePipelineStage, ActionExecutionError
+from app.services.pipeline.base import BasePipelineStage
 from app.services.notification_service import NotificationService
 from app.models import Lead, SalesConversation
 from app.core.database import get_session_factory

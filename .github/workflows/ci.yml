@@ -1,0 +1,78 @@
+name: CI
+
+# Lint and tests on every PR (and every push to staging), on the Python of the image (Y-27).
+# The tests run against a Postgres with the real schema: yeison_migrations is checked out with a
+# read-only deploy key (secret MIGRATIONS_READ_KEY) and upgraded to head, on the same branch
+# name as this PR's base (staging or main). Its tools/schema_contract.py then checks that these
+# models hold against that schema (Y-28).
+on:
+  pull_request:
+    branches: [staging, main]
+  push:
+    branches: [staging]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: yeison_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U test -d yeison_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: The migrations key is configured
+        env:
+          KEY: ${{ secrets.MIGRATIONS_READ_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::Missing secret MIGRATIONS_READ_KEY (read-only deploy key of FernandoGarcia19/yeison_migrations)"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          repository: FernandoGarcia19/yeison_migrations
+          ref: ${{ github.base_ref || github.ref_name }}
+          ssh-key: ${{ secrets.MIGRATIONS_READ_KEY }}
+          path: _migrations
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            _migrations/requirements.txt
+      - name: Install
+        # The migration tools pin other alembic/sqlalchemy versions than this service: own venv.
+        run: |
+          pip install -r requirements-dev.txt "psycopg[binary]==3.2.9"
+          python -m venv _migrations/.venv
+          _migrations/.venv/bin/pip install -r _migrations/requirements.txt
+      - name: Schema from yeison_migrations
+        working-directory: _migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/yeison_test
+        run: .venv/bin/alembic upgrade head
+      - name: Lint
+        run: ruff check --output-format=github --exclude _migrations .
+      - name: Schema contract (Y-28)
+        env:
+          SCHEMA_DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/yeison_test
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/yeison_test
+        run: python _migrations/tools/schema_contract.py schema_contract.toml
+      - name: Tests
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/yeison_test
+        run: python -m pytest -q -p no:cacheprovider tests

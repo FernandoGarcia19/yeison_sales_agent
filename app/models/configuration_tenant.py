@@ -3,7 +3,7 @@ ConfigurationTenant model - stores business-level configuration for a tenant.
 """
 
 from typing import Optional, TYPE_CHECKING
-from sqlalchemy import String, BigInteger, ForeignKey, JSON, Boolean
+from sqlalchemy import BigInteger, ForeignKey, JSON, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin

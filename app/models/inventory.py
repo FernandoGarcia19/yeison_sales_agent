@@ -4,7 +4,7 @@ InventoryTenant model - represents products available for a tenant.
 
 from typing import TYPE_CHECKING, Optional
 from decimal import Decimal
-from sqlalchemy import String, BigInteger, ForeignKey, Numeric, Integer
+from sqlalchemy import Text, BigInteger, ForeignKey, Numeric, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, ActiveMixin
@@ -30,10 +30,10 @@ class InventoryTenant(Base, TimestampMixin, ActiveMixin):
         nullable=False,
         index=True
     )
-    product_name: Mapped[str] = mapped_column(String, nullable=False)
+    product_name: Mapped[str] = mapped_column(Text, nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(8, 2), nullable=False)
     quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    description: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Relationships
     tenant: Mapped["Tenant"] = relationship(

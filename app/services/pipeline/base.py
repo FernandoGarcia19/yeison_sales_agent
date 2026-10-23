@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 import structlog
 
-from app.schemas.pipeline import PipelineContext, PipelineStage
+from app.schemas.pipeline import PipelineContext
 
 logger = structlog.get_logger()
 

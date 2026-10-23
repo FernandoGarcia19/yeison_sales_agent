@@ -1,0 +1,4 @@
+# Schema contract (Y-28): these models must hold against the real schema. The CI runs
+# yeison_migrations/tools/schema_contract.py with this file after upgrading Postgres to head.
+base = "app.models.base:Base"
+models = ["app.models"]

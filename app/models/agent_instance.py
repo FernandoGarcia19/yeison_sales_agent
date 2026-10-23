@@ -2,7 +2,7 @@
 AgentInstance model - represents a configured AI agent for a tenant.
 """
 
-from typing import Optional, List, TYPE_CHECKING
+from typing import List, TYPE_CHECKING
 from sqlalchemy import String, BigInteger, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 

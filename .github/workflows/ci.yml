@@ -55,12 +55,16 @@ jobs:
             requirements-dev.txt
             _migrations/requirements.txt
       - name: Install
-        run: pip install -r requirements-dev.txt -r _migrations/requirements.txt
+        # The migration tools pin other alembic/sqlalchemy versions than this service: own venv.
+        run: |
+          pip install -r requirements-dev.txt "psycopg[binary]==3.2.9"
+          python -m venv _migrations/.venv
+          _migrations/.venv/bin/pip install -r _migrations/requirements.txt
       - name: Schema from yeison_migrations
         working-directory: _migrations
         env:
           DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/yeison_test
-        run: alembic upgrade head
+        run: .venv/bin/alembic upgrade head
       - name: Lint
         run: ruff check --output-format=github --exclude _migrations .
       - name: Schema contract (Y-28)

@@ -237,6 +237,10 @@ INFORMACIÓN DE LA EMPRESA:
 - Sitio web: {tenant_info.get('website', 'N/A')}
 """
         
+        industry_rules = tenant_info.get("industry_rules") or []
+        if industry_rules:
+            system_prompt += "\nREGLAS DE NUESTRO RUBRO (síguelas siempre):\n" + "\n".join(f"- {rule}" for rule in industry_rules) + "\n"
+
         if contact_info and any(contact_info.values()):
             system_prompt += """
 INFORMACIÓN DE CONTACTO:"""

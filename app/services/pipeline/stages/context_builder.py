@@ -307,6 +307,10 @@ class ContextBuilderStage(BasePipelineStage):
                     tenant_info["location"] = tenant_config.business["location"]
                 if "website" in tenant_config.business:
                     tenant_info["website"] = tenant_config.business["website"]
+                # Rules of the business type, written by the panel from the owner's answers (Etapa 3)
+                rules = tenant_config.business.get("industry_rules")
+                if isinstance(rules, list) and rules:
+                    tenant_info["industry_rules"] = [str(rule).strip() for rule in rules if str(rule).strip()]
                 if "year_founded" in tenant_config.business:
                     tenant_info["year_founded"] = tenant_config.business["year_founded"]
                 

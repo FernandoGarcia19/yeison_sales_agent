@@ -42,6 +42,10 @@ async def send_payment_approval_request(
     conversation_id = sale_data.get("conversation_id", "0")
 
     checkout_str = "\n".join(f"    • {k}: {v}" for k, v in checkout_data.items()) or "    • N/A"
+    invoice_line = (
+        "🧾 <b>Pide factura</b> (su NIT/CI y razón social están en los datos)\n"
+        if sale_data.get("invoice_requested") else ""
+    )
     def _fmt_item(item: dict) -> str:
         name = item.get("name", "Item")
         qty = int(item.get("quantity", 1))
@@ -57,7 +61,7 @@ async def send_payment_approval_request(
         f"🚨 <b>NUEVA SOLICITUD DE APROBACIÓN DE PAGO</b> 🚨\n\n"
         f"📱 <b>Teléfono:</b> {phone}\n"
         f"📋 <b>Items:</b>\n{items_str}\n"
-        f"💰 <b>Total a Pagar:</b> {total_price}\n\n"
+        f"💰 <b>Total a Pagar:</b> {total_price}\n{invoice_line}\n"
         f"📝 <b>Datos de Checkout:</b>\n{checkout_str}\n\n"
         f"⚠️ Revisa el comprobante adjunto y decide."
     )
@@ -129,6 +133,10 @@ async def send_purchase_intent_notification(
     conversation_id = sale_data.get("conversation_id", "0")
 
     checkout_str = "\n".join(f"    • {k}: {v}" for k, v in checkout_data.items()) or "    • N/A"
+    invoice_line = (
+        "🧾 <b>Pide factura</b> (su NIT/CI y razón social están en los datos)\n"
+        if sale_data.get("invoice_requested") else ""
+    )
 
     def _fmt_item(item: dict) -> str:
         name = item.get("name", "Item")
@@ -145,7 +153,7 @@ async def send_purchase_intent_notification(
         f"🛒 <b>NUEVA INTENCIÓN DE COMPRA — PAGO FÍSICO</b>\n\n"
         f"📱 <b>Teléfono:</b> {phone}\n"
         f"📋 <b>Items:</b>\n{items_str}\n"
-        f"💰 <b>Total estimado:</b> {total_price}\n\n"
+        f"💰 <b>Total estimado:</b> {total_price}\n{invoice_line}\n"
         f"📝 <b>Datos de entrega:</b>\n{checkout_str}\n\n"
         f"ℹ️ El cliente eligió pago físico/efectivo. Aprueba para confirmar el pedido o rechaza para cancelarlo."
     )

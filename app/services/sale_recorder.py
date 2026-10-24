@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentInstance, Lead, SalesConversation, Tenant
 from app.models.sale import Sale
+from app.services.invoice_request import build_invoice_request
 
 logger = structlog.get_logger()
 
@@ -98,6 +99,7 @@ async def record_sale(
         payment_status="paid" if payment_method == "qr" else "pending",
         sale_items=items,
         currency=base_currency,
+        invoice_request=build_invoice_request(conversation.cart_contents),
     )
     db.add(sale)
     await db.flush()

@@ -33,6 +33,8 @@ class Sale(Base):
     sale_items: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False)
     currency: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
     exchange_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 8), nullable=True)
+    # Y-44: the customer asked for an invoice: {tax_id, name, requested_at}
+    invoice_request: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

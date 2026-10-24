@@ -4,7 +4,7 @@ Action executor stage - executes actions based on intent.
 
 import json
 from typing import Optional, List
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from datetime import datetime
 
 from openai import AsyncOpenAI
@@ -15,7 +15,7 @@ from app.services.notification_service import NotificationService
 from app.models import Lead, SalesConversation
 from app.core.database import get_session_factory
 from app.core.config import settings
-from app.services import llm_usage
+from app.services import invoice_request, llm_usage
 from app.services.pipeline.llm_models import model_for, request_options
 
 
@@ -54,6 +54,8 @@ class ActionExecutorStage(BasePipelineStage):
             intent=context.intent.value if context.intent else None,
             action_type=context.action_type
         )
+
+        await self._note_invoice_request(context)
 
         # If the customer is choosing between payment methods, intercept before normal routing.
         if context.current_state == ConversationState.AWAITING_PAYMENT_METHOD:
@@ -503,12 +505,43 @@ class ActionExecutorStage(BasePipelineStage):
         
         return False
 
+    async def _tenant_invoices(self, context: PipelineContext) -> bool:
+        """Only businesses in the general tax regime invoice; for the rest nothing is collected."""
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as db:
+                regime = (await db.execute(
+                    text("select tax_regime_code from tenant where id = :id"), {"id": context.tenant_id}
+                )).scalar_one_or_none()
+            return regime == "general"
+        except Exception as e:
+            self.log_error("tenant_regime_lookup_failed", error=str(e))
+            return False
+
+    async def _note_invoice_request(self, context: PipelineContext) -> None:
+        """Remember that the customer asked for an invoice (or changed their mind), Y-44."""
+        asked = invoice_request.mentions_invoice(context.message_body)
+        if asked is None:
+            return
+        if asked is False:
+            if context.cart_contents.pop("invoice_requested", None):
+                for key in [k for k in context.checkout_data if invoice_request.is_invoice_field(k)]:
+                    context.checkout_data.pop(key, None)
+                context.cart_contents["checkout_data"] = context.checkout_data
+                self.log_info("invoice_request_withdrawn")
+            return
+        if context.cart_contents.get("invoice_requested"):
+            return
+        if not await self._tenant_invoices(context):
+            self.log_info("invoice_asked_but_tenant_does_not_invoice")
+            return
+        context.cart_contents["invoice_requested"] = True
+        self.log_info("invoice_requested")
+
     def _get_checkout_requirements(self, context: PipelineContext) -> List[str]:
-        """Return list of required checkout fields from agent config."""
-        reqs = context.agent_config.get("checkout_requirements") if context.agent_config else None
-        if isinstance(reqs, list) and reqs:
-            return reqs
-        return ["Nombre completo", "Dirección de entrega", "NIT"]
+        """Required checkout fields from the agent config, plus the invoice data when the customer asked."""
+        configured = context.agent_config.get("checkout_requirements") if context.agent_config else None
+        return invoice_request.checkout_requirements(configured, bool(context.cart_contents.get("invoice_requested")))
 
     async def _extract_checkout_fields(
         self,
@@ -933,6 +966,7 @@ class ActionExecutorStage(BasePipelineStage):
                     ],
                     "total_price": f"${total:.2f}",
                     "checkout_data": context.checkout_data,
+                    "invoice_requested": bool(context.cart_contents.get("invoice_requested")),
                     "conversation_id": str(context.conversation_id or ""),
                 }
                 await telegram_service.send_payment_approval_request(
@@ -1056,6 +1090,7 @@ class ActionExecutorStage(BasePipelineStage):
                 ],
                 "total_price": f"${total:.2f}",
                 "checkout_data": context.checkout_data,
+                "invoice_requested": bool(context.cart_contents.get("invoice_requested")),
                 "conversation_id": str(context.conversation_id or ""),
             }
             await telegram_service.send_purchase_intent_notification(

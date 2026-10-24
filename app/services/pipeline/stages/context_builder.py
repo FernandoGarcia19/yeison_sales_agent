@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.base import BasePipelineStage
+from app.services.invoice_request import checkout_requirements
 from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant
 from app.core.database import get_session_factory
 from app.core.redis_client import (
@@ -143,8 +144,9 @@ class ContextBuilderStage(BasePipelineStage):
         elif current_state == ConversationState.CART_BUILDING:
             state_instructions = f"The user is adding items to their cart. Current cart: {context.cart_contents}. Ask if they need anything else before checkout."
         elif current_state == ConversationState.FULFILLMENT_COORD:
+            invoice_asked = bool(context.cart_contents.get("invoice_requested"))
             missing = [
-                f for f in (context.agent_config or {}).get("checkout_requirements", ["Nombre completo", "Dirección de entrega", "NIT"])
+                f for f in checkout_requirements((context.agent_config or {}).get("checkout_requirements"), invoice_asked)
                 if not context.checkout_data.get(f)
             ]
             collected_str = ", ".join(f"{k}: {v}" for k, v in context.checkout_data.items()) if context.checkout_data else "ninguno aún"
@@ -156,6 +158,11 @@ class ContextBuilderStage(BasePipelineStage):
                 f"Pide amablemente la información faltante. NO envíes el QR ni menciones el pago "
                 f"hasta que el usuario haya proporcionado todos los datos requeridos."
             )
+            if invoice_asked:
+                state_instructions += (
+                    " El cliente pidió factura: el NIT o CI y la razón social (los datos «para la factura») sirven para "
+                    "que el negocio la emita. No digas que ya fue emitida ni inventes su número."
+                )
         elif current_state == ConversationState.AWAITING_PAYMENT_METHOD:
             state_instructions = (
                 "El usuario ya confirmó su compra y proporcionó todos los datos necesarios. "

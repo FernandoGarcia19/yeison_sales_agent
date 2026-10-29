@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.base import BasePipelineStage, IdentificationError
 from app.models import AgentInstance, SalesConversation, Lead
+from app.core import simulation
 from app.core.database import get_session_factory
 from app.core.redis_client import (
     cache_get,
@@ -36,16 +37,31 @@ class IdentificationStage(BasePipelineStage):
             recipient_phone=context.recipient_phone
         )
         
-        # Try to get agent from cache first
-        cache_key = build_agent_by_phone_cache_key(context.recipient_phone)
-        cached_agent = await cache_get(cache_key)
+        # The test chat names its agent: it may not have a WhatsApp number yet
+        run = simulation.current()
+        if run is not None:
+            async with get_session_factory()() as db:
+                agent = (await db.execute(select(AgentInstance).where(
+                    AgentInstance.id == run.agent_id, AgentInstance.tenant_id == run.tenant_id,
+                    AgentInstance.active == True,  # noqa: E712
+                ))).scalar_one_or_none()
+            if not agent:
+                raise IdentificationError(f"No agent {run.agent_id} for the test chat",
+                                          stage=self.stage_name, context=context)
+            context.agent_instance_id = agent.id
+            context.tenant_id = agent.tenant_id
+            context.agent_config = agent.configuration
+        else:
+            # Try to get agent from cache first
+            cache_key = build_agent_by_phone_cache_key(context.recipient_phone)
+            cached_agent = await cache_get(cache_key)
         
-        if cached_agent:
+        if run is None and cached_agent:
             self.log_info("agent_found_in_cache", agent_id=cached_agent.get("id"))
             context.agent_instance_id = cached_agent.get("id")
             context.tenant_id = cached_agent.get("tenant_id")
             context.agent_config = cached_agent.get("configuration")
-        else:
+        elif run is None:
             # Query database
             session_factory = get_session_factory()
             async with session_factory() as db:

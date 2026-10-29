@@ -22,6 +22,7 @@ import structlog
 from sqlalchemy import select, text
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.core import simulation
 from app.core.config import settings
 from app.core.database import get_session_factory
 from app.models import AgentInstance, Lead, SalesConversation, Tenant
@@ -71,7 +72,31 @@ def pending_charge(cart_contents: Optional[Dict[str, Any]]) -> Optional[Dict[str
     return charge if charge and charge.get("status") == "pending" else None
 
 
+def _simulated_call(run, method: str, path: str, json: Optional[dict]) -> Dict[str, Any]:
+    """The QR service as the test chat sees it: charges live in the run, and only the
+    simulator's «Simular pago» marks one paid. Nothing reaches SIP."""
+    import uuid
+
+    if method == "POST" and path == "/sip/qr":
+        alias = f"sim-{uuid.uuid4().hex[:16]}"
+        run.bank_charges[alias] = {"alias": alias, "tenantId": json["tenantId"], "estado": "PENDIENTE",
+                                   "monto": json["monto"]}
+        expires = (datetime.utcnow() + timedelta(days=1)).strftime("%d/%m/%Y")
+        return {"alias": alias, "estado": "PENDIENTE", "idQr": "SIMULADO", "fechaVencimiento": expires,
+                "imagenQr": ""}
+    alias = path.split("/")[3]
+    charge = run.bank_charges.get(alias)
+    if charge is None:
+        raise BankQrError("QR service answered 404: unknown charge")
+    if path.endswith("/inhabilitar"):
+        charge["estado"] = "INHABILITADO"
+    return dict(charge)
+
+
 async def _call(method: str, path: str, json: Optional[dict] = None) -> Dict[str, Any]:
+    run = simulation.current()
+    if run is not None:
+        return _simulated_call(run, method, path, json)
     url = f"{settings.bank_qr_api_url.rstrip('/')}{path}"
     try:
         async with httpx.AsyncClient(timeout=settings.bank_qr_timeout_seconds) as client:

@@ -1,6 +1,7 @@
 import json
 import httpx
 import structlog
+from app.core import simulation
 from app.core.config import settings
 
 logger = structlog.get_logger()
@@ -74,6 +75,10 @@ async def send_payment_approval_request(
             ]
         ]
     }
+
+    if simulation.current():
+        simulation.capture("telegram", text=caption, buttons=["✅ Aprobar", "❌ Rechazar"], attachment="comprobante")
+        return
 
     is_image = content_type.startswith("image/")
     endpoint = "sendPhoto" if is_image else "sendDocument"
@@ -167,6 +172,10 @@ async def send_purchase_intent_notification(
         ]
     }
 
+    if simulation.current():
+        simulation.capture("telegram", text=text, buttons=["✅ Aprobar pedido", "❌ Rechazar pedido"])
+        return
+
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -213,6 +222,9 @@ async def send_bank_qr_paid_notification(chat_id: str, sale_data: dict) -> None:
         f"📝 <b>Datos de entrega:</b>\n{checkout_str}\n\n"
         f"ℹ️ No hace falta aprobar: el cliente ya recibió la confirmación. Prepara el pedido."
     )
+    if simulation.current():
+        simulation.capture("telegram", text=text)
+        return
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:

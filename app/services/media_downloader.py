@@ -7,10 +7,17 @@ Twilio support remains deprecated; Evolution is the primary path.
 import httpx
 import structlog
 
+from app.core import simulation
 from app.core.config import settings
 from app.services.whatsapp_connections import get_whatsapp_connection_for_phone
 
 logger = structlog.get_logger()
+
+# 1x1 PNG standing in for the receipt photo of the agent test chat
+SIMULATED_RECEIPT = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cf"
+    "c0f01f0005000201a5f5d1b40000000049454e44ae426082"
+)
 
 
 async def download_whatsapp_media(
@@ -23,6 +30,8 @@ async def download_whatsapp_media(
     Returns (file_bytes, content_type).
     content_type is normalized (no charset suffix), e.g. 'image/jpeg' or 'application/pdf'.
     """
+    if simulation.current():
+        return SIMULATED_RECEIPT, "image/png"
     if url.startswith("evolution-media://"):  # WhatsApp media is encrypted: Evolution decrypts it for us
         from app.integrations.whatsapp.evolution import fetch_media
 

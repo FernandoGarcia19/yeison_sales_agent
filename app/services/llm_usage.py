@@ -21,7 +21,7 @@ from typing import Any, Optional
 import structlog
 
 from app.core.config import settings
-from app.core.database import get_session_factory
+from app.core.database import get_base_session_factory
 from app.models.llm_usage import LlmUsage
 
 logger = structlog.get_logger()
@@ -74,7 +74,7 @@ def _tokens(usage: Any) -> tuple[int, int, int]:
 
 async def _write(row: dict[str, Any]) -> None:
     try:
-        async with get_session_factory()() as db:
+        async with get_base_session_factory()() as db:
             db.add(LlmUsage(**row))
             await db.commit()
     except Exception as exc:  # never let accounting break a sale

@@ -14,6 +14,7 @@ from app.services.pipeline.base import BasePipelineStage
 from app.services.notification_service import NotificationService
 from app.models import Lead, SalesConversation
 from app.core.database import get_session_factory
+from app.core import simulation
 from app.core.config import settings
 from app.services import bank_qr, invoice_request, llm_usage
 from app.services.pipeline.llm_models import model_for, request_options
@@ -514,7 +515,9 @@ class ActionExecutorStage(BasePipelineStage):
             object_key = f"payments/bank_qr/tenant_{context.tenant_id}/{charge['alias']}.png"
             from app.services import r2_storage
             await r2_storage.upload_bytes(object_key, bank_qr.qr_png(charge), "image/png")
-            qr_url = r2_storage.get_presigned_url(object_key, expires_in=900)
+            # The test chat draws its own placeholder for the QR
+            qr_url = ("simulated://bank-qr" if simulation.current()
+                      else r2_storage.get_presigned_url(object_key, expires_in=900))
         except Exception as e:
             self.log_error("bank_qr_create_failed", error=str(e), error_type=type(e).__name__)
             return False

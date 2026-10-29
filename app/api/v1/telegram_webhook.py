@@ -9,6 +9,7 @@ from app.models import SalesConversation, AgentInstance
 from app.schemas.pipeline import ConversationState
 from app.integrations.whatsapp.client import send_whatsapp_message
 import httpx
+from app.core import simulation
 from app.core.config import settings
 from app.services.sale_recorder import record_sale
 
@@ -321,6 +322,10 @@ async def _replace_text_message(chat_id: str, message_id: int, text: str) -> boo
 
 async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> None:
     """Ask panel_backend to record the SALE_EXIT movements of a sale. Failures are logged, never raised."""
+    if simulation.current():
+        simulation.capture("inventory", items=[{"name": i.get("name"), "quantity": i.get("quantity")}
+                                               for i in sale_items or []])
+        return
     if not settings.backend_api_url or not settings.backend_api_key:
         logger.error("stock_exit_missing_backend_config", sale_id=sale_id)
         return
@@ -342,6 +347,9 @@ async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> Non
 
 
 async def _send_telegram_message(chat_id: str, text: str, reply_markup: Optional[dict] = None) -> None:
+    if simulation.current():
+        simulation.capture("telegram", text=text)
+        return
     if not settings.telegram_bot_token:
         return
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
@@ -464,6 +472,8 @@ async def process_telegram_callback(callback_data: str, chat_id: int, message_id
 
 
 async def edit_telegram_message_text(chat_id: int, message_id: int, new_text: str):
+    if simulation.current():
+        return
     if not settings.telegram_bot_token:
         return
 

@@ -423,7 +423,10 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
         # Add action result if available
         if context.action_result:
             action = context.action_result.get("action")
-            if action == "order_cancelled":
+            if action == "collect_checkout_data" and items:
+                # Y-56: the customer sees what they are buying before giving their data
+                prompt += "Antes de pedir los datos, muestra el pedido (CARRITO ACTUAL) con su total.\n\n"
+            elif action == "order_cancelled":
                 prompt += "EL CLIENTE CANCELÓ EL PEDIDO: el carrito quedó vacío. Confírmaselo en una línea y ofrece ayuda.\n\n"
             elif action == "cart_updated":
                 next_step = context.action_result.get("next")

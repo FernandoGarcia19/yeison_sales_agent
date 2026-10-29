@@ -125,6 +125,15 @@ def test_prompt_prices_in_bolivianos():
     assert "*un asterisco*" in system
 
 
+def test_the_order_is_shown_before_asking_the_data():
+    context = _context("Quiero 2 galletas")
+    context.cart_contents = {"items": [{"id": 1, "name": "Galletas de quinua", "price": "8.00", "quantity": 2}]}
+    context.action_type, context.action_result = "collect_checkout_data", {"action": "collect_checkout_data"}
+    prompt = ResponseGeneratorStage()._build_user_prompt(context)
+    assert "2 x Galletas de quinua — Bs 16.00" in prompt and "Total: Bs 16.00" in prompt
+    assert "muestra el pedido (CARRITO ACTUAL) con su total" in prompt
+
+
 def test_unconfirmed_order_is_not_called_confirmed():
     context = _context("Quiero 2")
     context.action_type, context.action_result = "purchase_intent", {"action": "qualify_lead"}

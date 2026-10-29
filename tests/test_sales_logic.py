@@ -27,7 +27,7 @@ def test_options_from_the_onboarding():
     assert options["pickup"] == {"address": "Calle Sagárnaga 123, La Paz", "hours": "L-S 9 a 19"}
     section = delivery.prompt_section(options)
     assert "La Paz y El Alto" in section and "Bs 15" in section and "Calle Sagárnaga 123" in section
-    assert "NO digas que sí" in section
+    assert "NO empieces con «sí»" in section
 
 
 def test_only_pickup_says_there_is_no_delivery():
@@ -165,6 +165,15 @@ async def test_asking_for_a_person_pauses_the_agent(executor):
     assert ("whatsapp", "+59170000001") in executor.sent and ("telegram", "77") in executor.sent
     # The cart waits for the person, untouched
     assert context.cart_contents["items"] and context.cart_contents["state_before_pause"] == "fulfillment_coord"
+
+
+async def test_a_state_stored_as_text_also_pauses(executor):
+    # Conversations loaded from the database (and the test chat) carry the state as plain text
+    context = _context("Quiero hablar con una persona")
+    context.current_state = "fulfillment_coord"
+    await executor.process(context)
+    assert context.current_state == ConversationState.PAUSED
+    assert context.cart_contents["state_before_pause"] == "fulfillment_coord"
 
 
 async def test_the_business_keywords_also_pause(executor):

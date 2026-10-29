@@ -115,8 +115,9 @@ def prompt_section(options: Dict[str, Any]) -> str:
         return ("ENTREGAS: el negocio no configuró cómo entrega. NO prometas envíos, zonas, costos ni tiempos: "
                 "si preguntan, di que lo confirmas con el equipo.\n")
     head = "ENTREGAS (lo único que puedes afirmar):\n" + "\n".join(lines) + "\n"
-    rule = ("Si preguntan por un lugar, costo o tiempo que no figura arriba, NO digas que sí: di que lo consultas "
-            "con el equipo y que le avisan por aquí.\n")
+    rule = ("Si preguntan por un lugar, costo o tiempo que no figura arriba, NO empieces con «sí» ni digas que "
+            "hacemos envíos: di primero que a ese lugar no tenemos el envío confirmado, cuál es la cobertura que sí "
+            "figura arriba, y que lo consultas con el equipo y le avisan por aquí.\n")
     if not options.get("delivery") and not options.get("note"):
         rule += "No hacemos envíos: solo retiro en tienda.\n"
     if not options.get("pickup") and options.get("delivery"):

@@ -1,0 +1,10 @@
+name = "Un «sí» sin oferta no abre una compra"
+agent = "moda"
+
+[[turns]]
+say = "Hola"
+expect = { state = "browsing", cart = {} }
+
+[[turns]]
+say = "Sí"
+expect = { state = "browsing", cart = {}, supervisor = false }

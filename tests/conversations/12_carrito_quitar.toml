@@ -1,0 +1,11 @@
+name = "Carrito: quitar un producto"
+agent = "moda"
+known_issue = "Y-56"
+
+[[turns]]
+say = "Quiero 2 packs de medias y una gorra Illimani"
+expect = { cart = { "Medias pack x3" = 2, "Gorra bordada Illimani" = 1 } }
+
+[[turns]]
+say = "Quita la gorra"
+expect = { cart = { "Medias pack x3" = 2 } }

@@ -132,6 +132,14 @@ no existe, con otro tipo, o que rompería un insert.
   TEST_DATABASE_URL=postgresql+asyncpg://test:test@127.0.0.1:55432/yeison_test python -m pytest -q tests
   ```
 
+- Pruebas de conversación (Y-55): `tests/conversations/*.toml` son charlas con guion que corren con el modelo real por el
+  chat de prueba del panel (no guardan ni envían nada). Se corren antes de mergear un cambio del agente; no van en el CI.
+
+  ```bash
+  cp tools/conversations.example.toml tools/conversations.local.toml   # cuentas de prueba, ignorado por git
+  python tools/run_conversations.py --env staging
+  ```
+
 - `.github/workflows/ci.yml` (llega con el PR #20, que espera el secreto `MIGRATIONS_READ_KEY`), en cada PR a `staging` o
   `main` y en cada push a `staging`:
   - Postgres 16;

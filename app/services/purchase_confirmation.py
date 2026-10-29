@@ -31,8 +31,8 @@ _YES = {"si", "sip", "dale", "ok", "okay", "okey", "oki", "listo", "claro", "per
         "bueno", "correcto", "exacto", "acuerdo", "eso", "afirmativo", "obvio"}
 _FILLER = {"de", "es", "asi", "por", "favor", "porfa", "gracias", "nomas", "todo", "ya", "entonces",
            "muy", "bien", "y", "que", "lo", "esta", "seria", "senor", "senora", "hermano", "amigo", "amiga"}
-# The agent proposed the order and waits for the customer's confirmation (qualify_lead)
-_ORDER_OFFER = "purchase_intent"
+# The agent proposed the order (qualify_lead) or showed the changed cart, and waits for a confirmation
+_ORDER_OFFERS = {"purchase_intent", "cart_updated"}
 # Answers after which a "yes" means "go ahead" only if the agent asked something
 _QUESTION_ACTIONS = {"pricing_inquiry", "product_inquiry", "availability_check"}
 
@@ -63,7 +63,7 @@ def purchase_was_offered(history: Optional[List[Dict[str, Any]]]) -> bool:
         return False
     action = last.get("action_type")
     # The model does not always end the offer with a question mark ("te lo dejo listo para confirmar")
-    if action == _ORDER_OFFER:
+    if action in _ORDER_OFFERS:
         return True
     return action in _QUESTION_ACTIONS and "?" in (last.get("content") or "")
 

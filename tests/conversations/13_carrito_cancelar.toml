@@ -1,6 +1,5 @@
 name = "Carrito: cancelar el pedido"
 agent = "moda"
-known_issue = "Y-56"
 
 [[turns]]
 say = "Quiero 1 bolso de aguayo"

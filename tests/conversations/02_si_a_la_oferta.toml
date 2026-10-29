@@ -3,7 +3,7 @@ agent = "moda"
 
 [[turns]]
 say = "Me interesa una chompa de alpaca"
-expect = { state = "browsing", cart = {}, not_says = ["confirmado", "registrado"] }
+expect = { state = "cart_building", cart = { "Chompa de alpaca" = 1 }, says = ["Bs 320"], not_says = ["confirmado", "registrado"] }
 
 [[turns]]
 say = "Sí"

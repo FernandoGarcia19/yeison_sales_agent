@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.schemas.pipeline import PipelineContext
+from app.schemas.pipeline import ConversationState, PipelineContext
 from app.services.pipeline.base import BasePipelineStage
 from app.services import catalog_search, purchase_confirmation
 from app.services.invoice_request import checkout_requirements
@@ -114,8 +114,11 @@ class ContextBuilderStage(BasePipelineStage):
             
             # Load relevant inventory based on intent (with tenant-scoped caching). A bare "sí"
             # to the agent's offer is classified as unknown but closes a purchase (action_executor)
+            # A cart in progress may change with any message ("quita la gorra"), so it gets the catalogue too (Y-56)
             if context.intent in ["product_inquiry", "pricing_question", "availability_check", "purchase_intent"] or (
                 purchase_confirmation.confirms_offer(context.message_body, context.conversation_history)
+            ) or context.current_state in (
+                ConversationState.CART_BUILDING, ConversationState.FULFILLMENT_COORD, ConversationState.AWAITING_PAYMENT_METHOD
             ):
                 # The whole catalogue is cached (the old key held only 5 products)
                 inventory_cache_key = build_inventory_cache_key(context.tenant_id) + ":catalogue"
@@ -140,13 +143,15 @@ class ContextBuilderStage(BasePipelineStage):
                 )
         
         # Add specific instructions based on ConversationState
-        from app.schemas.pipeline import ConversationState
         state_instructions = ""
         current_state = context.current_state
         if current_state == ConversationState.BROWSING:
             state_instructions = "The user is currently browsing. Answer their questions about our products."
         elif current_state == ConversationState.CART_BUILDING:
-            state_instructions = f"The user is adding items to their cart. Current cart: {context.cart_contents}. Ask if they need anything else before checkout."
+            state_instructions = (
+                "El cliente está armando su pedido (el carrito está en CARRITO ACTUAL). "
+                "Pregúntale si quiere algo más o si confirma el pedido."
+            )
         elif current_state == ConversationState.FULFILLMENT_COORD:
             invoice_asked = bool(context.cart_contents.get("invoice_requested"))
             missing = [

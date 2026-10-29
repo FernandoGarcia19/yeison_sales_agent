@@ -1,0 +1,14 @@
+name = "Carrito: agregar mientras pide los datos y seguir"
+agent = "moda"
+
+[[turns]]
+say = "Quiero 2 packs de medias"
+expect = { state = "fulfillment_coord", cart = { "Medias pack x3" = 2 } }
+
+[[turns]]
+say = "Agrégame también una gorra Illimani"
+expect = { state = "fulfillment_coord", cart = { "Medias pack x3" = 2, "Gorra bordada Illimani" = 1 }, says = ["Bs 130"] }
+
+[[turns]]
+say = "Luis Mamani, Av. 6 de Agosto 100, NIT 4455667"
+expect = { state = "awaiting_receipt", cart = { "Medias pack x3" = 2, "Gorra bordada Illimani" = 1 }, supervisor = true }

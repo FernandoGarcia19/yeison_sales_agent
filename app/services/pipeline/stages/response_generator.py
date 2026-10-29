@@ -12,6 +12,7 @@ from app.integrations.whatsapp.client import send_whatsapp_message
 from app.integrations.whatsapp.formatting import to_whatsapp
 from app.core.config import settings
 from app.core.money import label as currency_label, money
+from app.services import cart
 from app.services import llm_usage
 from app.services.pipeline.llm_models import model_for, request_options
 
@@ -404,8 +405,33 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
                 prompt += f"Nombre: {lead_name}\n"
                 prompt += f"Estado: {context.lead_info.get('status', 'nuevo')}\n\n"
         
+        # The cart as the code left it: the only order there is (Y-56)
+        items = (context.cart_contents or {}).get("items") or []
+        if items:
+            summary = cart.summary(items, self._currency(context))
+            prompt += "CARRITO ACTUAL (lo único que el cliente tiene pedido):\n"
+            prompt += "\n".join(f"- {line}" for line in summary["lines"]) + f"\nTotal: {summary['total']}\n\n"
+        changes = (context.action_result or {}).get("cart_changes") or []
+        if changes:
+            prompt += "CAMBIOS EN EL CARRITO EN ESTE MENSAJE (dilos tal cual):\n" + "\n".join(f"- {c}" for c in changes) + "\n\n"
+        prompt += (
+            "REGLA DEL CARRITO: solo di que agregaste, cambiaste o quitaste algo si figura en CAMBIOS EN EL CARRITO. "
+            "Si un producto no está en el catálogo, dilo y ofrece los parecidos de PRODUCTOS RELEVANTES. "
+            "Si no alcanzó el stock, di cuántos hay.\n\n"
+        )
+
         # Add action result if available
         if context.action_result:
+            action = context.action_result.get("action")
+            if action == "order_cancelled":
+                prompt += "EL CLIENTE CANCELÓ EL PEDIDO: el carrito quedó vacío. Confírmaselo en una línea y ofrece ayuda.\n\n"
+            elif action == "cart_updated":
+                next_step = context.action_result.get("next")
+                prompt += {
+                    "collect_checkout_data": "Muestra el pedido actualizado con su total y pide los datos que faltan.\n\n",
+                    "choose_payment_method": "Muestra el pedido actualizado con su total y pregunta cómo quiere pagar.\n\n",
+                    "cart_empty": "El pedido quedó vacío. Dilo y pregunta si quiere otra cosa.\n\n",
+                }.get(next_step, "Muestra el pedido actualizado con su total y pregunta si lo confirma o quiere algo más.\n\n")
             prompt += "RESULTADO DE ACCIÓN EJECUTADA:\n"
             prompt += f"Acción: {context.action_type}\n"
             prompt += f"Resultado: {json.dumps(context.action_result, ensure_ascii=False)}\n\n"

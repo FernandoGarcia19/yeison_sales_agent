@@ -17,8 +17,16 @@ from app.core.database import get_session_factory
 from app.core import simulation
 from app.core.config import settings
 from app.core.money import money
-from app.services import bank_qr, invoice_request, llm_usage, purchase_confirmation
+from app.services import bank_qr, cart, invoice_request, llm_usage, purchase_confirmation
 from app.services.pipeline.llm_models import model_for, request_options
+
+
+# Before payment the cart can still change (Y-56)
+CART_STATES = (
+    ConversationState.CART_BUILDING,
+    ConversationState.FULFILLMENT_COORD,
+    ConversationState.AWAITING_PAYMENT_METHOD,
+)
 
 
 class ActionExecutorStage(BasePipelineStage):
@@ -58,6 +66,17 @@ class ActionExecutorStage(BasePipelineStage):
         )
 
         await self._note_invoice_request(context)
+
+        # Changes to the cart before paying: add, change, remove or cancel (Y-56)
+        if (
+            context.current_state in CART_STATES
+            and context.cart_contents.get("items")
+            and context.action_type != "payment_proof_received"
+            and cart.might_edit(context.message_body, self._cart_catalogue(context))
+            and await self._handle_cart_edit(context)
+        ):
+            self.log_info("action_executed", action_type=context.action_type)
+            return context
 
         # If the customer is choosing between payment methods, intercept before normal routing.
         if context.current_state == ConversationState.AWAITING_PAYMENT_METHOD:
@@ -189,34 +208,9 @@ class ActionExecutorStage(BasePipelineStage):
                 context.action_result = {"action": "order_already_completed"}
                 return
 
-        if not is_purchase_confirmed:
-            # Just qualify the lead, not ready to purchase yet
-            context.action_result = {
-                "lead_id": context.lead_info.get("id") if context.lead_info else None,
-                "action": "qualify_lead",
-                "stage": "considering"
-            }
-            return
-
-        # Capture which products (and quantities) the user wants — only on the
-        # first turn of this purchase intent so we don't overwrite a stored cart.
+        changes: list = []
         if not context.cart_contents.get("items"):
-            extracted = await self._extract_purchase_items(
-                context.message_body, context.conversation_history, context.relevant_products, context=context
-            )
-            selected = []
-            for entry in extracted:
-                prod = next(
-                    (p for p in context.relevant_products if str(p.get("id")) == str(entry.get("id"))),
-                    None,
-                )
-                if prod:
-                    selected.append({**prod, "quantity": int(entry.get("quantity", 1))})
-            if not selected and len(context.relevant_products) == 1:
-                # Single product available — treat it as the selection
-                selected = [{**context.relevant_products[0], "quantity": 1}]
-            if selected:
-                context.cart_contents["items"] = selected
+            changes = await self._fill_cart(context, confirmed=is_purchase_confirmed)
 
         if not context.cart_contents.get("items"):
             # Nothing identifiable to sell: ask for the product instead of collecting data
@@ -226,6 +220,19 @@ class ActionExecutorStage(BasePipelineStage):
                 "action": "qualify_lead",
                 "stage": "considering",
                 "missing": "product",
+                "cart_changes": cart.describe_changes(changes),
+            }
+            return
+
+        if not is_purchase_confirmed:
+            # The cart is ready; the customer still has to confirm it
+            context.current_state = ConversationState.CART_BUILDING
+            context.action_result = {
+                "lead_id": context.lead_info.get("id") if context.lead_info else None,
+                "action": "qualify_lead",
+                "stage": "considering",
+                "cart": cart.summary(context.cart_contents["items"], self._currency(context)),
+                "cart_changes": cart.describe_changes(changes),
             }
             return
 
@@ -240,6 +247,8 @@ class ActionExecutorStage(BasePipelineStage):
                 "required_fields": required_fields,
                 "missing_fields": missing_fields,
                 "collected": context.checkout_data,
+                "cart": cart.summary(context.cart_contents["items"], self._currency(context)),
+                "cart_changes": cart.describe_changes(changes),
             }
             return
 
@@ -689,39 +698,52 @@ class ActionExecutorStage(BasePipelineStage):
             self.log_error("checkout_extraction_failed", error=str(e))
             return {}
 
-    async def _extract_purchase_items(
-        self,
-        message: str,
-        conversation_history: list,
-        available_products: list,
-        context: Optional[PipelineContext] = None,
-    ) -> list:
-        """Use LLM to identify which products (and quantities) the user wants to buy."""
-        if not available_products or not message.strip():
-            return []
+    def _cart_catalogue(self, context: PipelineContext) -> list:
+        """The products a cart operation may name: this turn's catalogue match plus what is in the cart."""
+        seen = {str(p.get("id")) for p in context.relevant_products}
+        return list(context.relevant_products) + [
+            line for line in context.cart_contents.get("items") or [] if str(line.get("id")) not in seen
+        ]
+
+    async def _extract_cart_operations(self, context: PipelineContext) -> dict:
+        """Ask the small model what this message does to the cart. The code applies it (app/services/cart.py)."""
+        if not (context.message_body or "").strip():
+            return {"operations": [], "cancel": False}
+        products = self._cart_catalogue(context)
 
         products_str = "\n".join(
             f'- id={p.get("id")}, name="{p.get("name") or p.get("product_name", "")}", price={p.get("price", 0)}'
-            for p in available_products
+            for p in products
+        ) or "(none)"
+        cart_str = "\n".join(
+            f'- id={line.get("id")}, name="{line.get("name")}", quantity={line.get("quantity")}'
+            for line in context.cart_contents.get("items") or []
+        ) or "(empty)"
+        history_str = "\n".join(
+            f'{"Customer" if m.get("role") == "user" else "Agent"}: {m.get("content", "")}'
+            for m in (context.conversation_history or [])[-5:]
         )
-        history_str = ""
-        if conversation_history:
-            recent = conversation_history[-5:]
-            history_str = "\n".join(
-                f'{"Usuario" if m.get("role") == "user" else "Agente"}: {m.get("content", "")}'
-                for m in recent
-            )
-
         prompt = (
-            "From the conversation below, identify which products the user wants to purchase and in what quantity.\n"
-            'Return a JSON object with key "items" containing a list of {"id": <product_id>, "quantity": <int>}.\n'
-            "Only include products explicitly chosen by the user. Default quantity to 1 if not stated.\n"
-            'If no specific product is identifiable return {"items": []}.\n\n'
-            f"Available products:\n{products_str}\n\n"
+            "You keep the shopping cart of a customer chatting with a shop on WhatsApp (in Spanish).\n"
+            "From the LATEST customer message, list the changes it makes to the cart.\n"
+            'Return JSON: {"operations": [{"op": "add"|"set"|"remove", "id": <catalogue id or null>, '
+            '"name": "<the product as the customer said it>", "quantity": <int>}], "cancel": <bool>}\n'
+            "Rules:\n"
+            '- "add": the customer wants a product or more of it; quantity = how many more (default 1).\n'
+            '- "set": the customer gives the final quantity of a product already in the cart '
+            '("mejor que sean 3", "solo 1"), or repeats one of them with a quantity.\n'
+            '- "remove": take a product out ("quita la gorra", "ya no quiero las medias").\n'
+            '- "cancel": true only when the customer drops the whole order ("cancela el pedido", "ya no quiero nada").\n'
+            "- id must be one of the catalogue ids. If the customer asks for something that is not in the catalogue "
+            "(another material, colour or product), use id null and the name they used. Never swap it for a different product.\n"
+            "- Questions about price, stock or delivery change nothing.\n"
+            "- If the latest message only agrees (si, dale, ok) to what the agent offered and the cart is empty, "
+            "add the products and quantities the agent offered.\n"
+            '- If nothing changes, return {"operations": [], "cancel": false}.\n\n'
+            f"Catalogue:\n{products_str}\n\nCurrent cart:\n{cart_str}\n\n"
             + (f"Recent conversation:\n{history_str}\n\n" if history_str else "")
-            + f'Latest user message: "{message}"\n\nReturn only valid JSON.'
+            + f'Latest customer message: "{context.message_body}"\n\nReturn only valid JSON.'
         )
-
         try:
             client = self._get_client()
             model = model_for("item_extraction")
@@ -729,15 +751,77 @@ class ActionExecutorStage(BasePipelineStage):
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                extra_body=request_options(context, "item_extraction", max_completion_tokens=200),
+                extra_body=request_options(context, "item_extraction", max_completion_tokens=300),
                 response_format={"type": "json_object"},
             )
             llm_usage.record(context, "sales.item_extraction", model, response)
             result = json.loads(response.choices[0].message.content.strip())
-            return result.get("items", [])
+            operations = result.get("operations") if isinstance(result.get("operations"), list) else []
+            return {"operations": [op for op in operations if isinstance(op, dict)], "cancel": bool(result.get("cancel"))}
         except Exception as e:
-            self.log_error("purchase_item_extraction_failed", error=str(e))
-            return []
+            self.log_error("cart_operations_extraction_failed", error=str(e))
+            return {"operations": [], "cancel": False}
+
+    async def _fill_cart(self, context: PipelineContext, confirmed: bool) -> list:
+        """First products of a purchase. Returns the changes (including products not found or out of stock)."""
+        extracted = await self._extract_cart_operations(context)
+        items, changes = cart.apply([], extracted["operations"], self._cart_catalogue(context))
+        if not items and not changes and confirmed and len(context.relevant_products) == 1:
+            # Single product available and nothing named: that is the selection
+            items, changes = cart.apply([], [{"op": "add", "id": context.relevant_products[0].get("id")}],
+                                        context.relevant_products)
+        if items:
+            context.cart_contents["items"] = items
+        return changes
+
+    def _clear_cart(self, context: PipelineContext) -> None:
+        for key in ("items", "checkout_data", "invoice_requested", "payment_method", "payment_proof_submitted"):
+            context.cart_contents.pop(key, None)
+        context.checkout_data = {}
+        context.current_state = ConversationState.BROWSING
+
+    async def _handle_cart_edit(self, context: PipelineContext) -> bool:
+        """Apply what the message does to a cart in progress. False when it changes nothing."""
+        extracted = await self._extract_cart_operations(context)
+        currency = self._currency(context)
+        if extracted["cancel"]:
+            self._clear_cart(context)
+            context.action_type = "order_cancelled"
+            context.action_result = {"action": "order_cancelled"}
+            return True
+
+        items, changes = cart.apply(context.cart_contents.get("items") or [], extracted["operations"],
+                                    self._cart_catalogue(context))
+        if not changes:
+            return False
+
+        if not items:
+            self._clear_cart(context)
+            context.action_type = "cart_updated"
+            context.action_result = {"action": "cart_updated", "cart_changes": cart.describe_changes(changes),
+                                     "cart": cart.summary([], currency), "next": "cart_empty"}
+            return True
+
+        context.cart_contents["items"] = items
+        if context.current_state == ConversationState.CART_BUILDING and await self._is_purchase_confirmed(context):
+            # "Agrégame una gorra y confirmo": the change and the confirmation in one message
+            await self._handle_purchase_intent(context)
+            context.action_result = {**(context.action_result or {}), "cart_changes": cart.describe_changes(changes)}
+            return True
+
+        context.action_type = "cart_updated"
+        result = {"action": "cart_updated", "cart_changes": cart.describe_changes(changes),
+                  "cart": cart.summary(items, currency)}
+        if context.current_state == ConversationState.FULFILLMENT_COORD:
+            required = self._get_checkout_requirements(context)
+            result["next"] = "collect_checkout_data"
+            result["missing_fields"] = [f for f in required if not context.checkout_data.get(f)]
+        elif context.current_state == ConversationState.AWAITING_PAYMENT_METHOD:
+            result["next"] = "choose_payment_method"
+        else:
+            result["next"] = "confirm_order"
+        context.action_result = result
+        return True
 
     async def _start_new_purchase_cycle(self, context: PipelineContext) -> None:
         """Create a new lead and reset the cart for a fresh purchase cycle."""

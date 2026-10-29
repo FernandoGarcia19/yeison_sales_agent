@@ -172,9 +172,9 @@ async def test_a_confirmation_without_a_product_does_not_open_the_checkout(monke
     stage = ActionExecutorStage()
 
     async def nothing_found(*args, **kwargs):
-        return []
+        return {"operations": [], "cancel": False}
 
-    monkeypatch.setattr(stage, "_extract_purchase_items", nothing_found)
+    monkeypatch.setattr(stage, "_extract_cart_operations", nothing_found)
     context = _context("Sí")
     context.relevant_products = [{"id": 1, "name": "Polera", "price": "50"}, {"id": 2, "name": "Galletas", "price": "8"}]
     await stage._handle_purchase_intent(context)

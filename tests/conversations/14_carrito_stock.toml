@@ -1,6 +1,5 @@
 name = "Carrito: más que el stock (hay 10 chompas)"
 agent = "moda"
-known_issue = "Y-56"
 
 [[turns]]
 say = "Quiero 15 chompas de alpaca"

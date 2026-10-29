@@ -173,7 +173,15 @@ class ContextBuilderStage(BasePipelineStage):
         elif current_state == ConversationState.AWAITING_RECEIPT:
             payment_method = context.cart_contents.get("payment_method", "qr")
             proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
-            if payment_method == "physical":
+            bank_charge = (context.cart_contents.get("bank_qr") or {})
+            if bank_charge.get("status") == "pending":
+                state_instructions = (
+                    "Le enviamos al usuario un QR del banco por el total exacto de su pedido. El pago se confirma "
+                    "solo: en cuanto el banco nos avise, le confirmamos por este chat. NO pidas comprobante. "
+                    "Si dice que ya pagó, dile que estamos esperando la confirmación del banco, que suele llegar "
+                    "en segundos. Si quiere cambiar el pedido, dile que lo puede hacer y que le enviaremos un QR nuevo."
+                )
+            elif payment_method == "physical":
                 state_instructions = (
                     "El usuario eligió pago físico/efectivo. Su pedido fue enviado al supervisor para aprobación. "
                     "Informa amablemente que su pedido está siendo revisado y que el equipo se pondrá en contacto "

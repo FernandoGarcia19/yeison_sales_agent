@@ -15,7 +15,7 @@ from app.services.notification_service import NotificationService
 from app.models import Lead, SalesConversation
 from app.core.database import get_session_factory
 from app.core.config import settings
-from app.services import invoice_request, llm_usage
+from app.services import bank_qr, invoice_request, llm_usage
 from app.services.pipeline.llm_models import model_for, request_options
 
 
@@ -64,6 +64,16 @@ class ActionExecutorStage(BasePipelineStage):
 
         # If waiting for payment proof, only allow payment_proof_received through
         if context.current_state == ConversationState.AWAITING_RECEIPT:
+            charge = bank_qr.pending_charge(context.cart_contents)
+            if charge and await self._bank_qr_paid(context, charge):
+                return context
+            if charge and context.action_type != "payment_proof_received":
+                context.action_type = "awaiting_bank_payment"
+                context.action_result = {
+                    "action": "awaiting_bank_payment",
+                    "amount": bank_qr.amount_label(charge.get("amount", 0), charge.get("currency", "BOB")),
+                }
+                return context
             if context.action_type != "payment_proof_received":
                 proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
                 if proof_submitted:
@@ -249,7 +259,6 @@ class ActionExecutorStage(BasePipelineStage):
             "hacer el pago",
             "pagar ahora",
             "enviar",
-            "envío",
             "quiero comprar",
             "voy a comprar",
             "compro el plan",
@@ -315,9 +324,12 @@ class ActionExecutorStage(BasePipelineStage):
                     return {"qr": False, "physical": True}
 
                 sales_process = (agent.configuration or {}).get("sales_process") or {}
+                bank = bank_qr.enabled_for(sales_process)
                 return {
-                    "qr": bool(sales_process.get("QR_payment")),
+                    # The bank QR is a QR payment too: the customer chooses "QR" either way
+                    "qr": bool(sales_process.get("QR_payment")) or bank,
                     "physical": bool(sales_process.get("physical_payment")),
+                    "bank_qr": bank,
                 }
 
         except Exception as e:
@@ -396,8 +408,12 @@ class ActionExecutorStage(BasePipelineStage):
         2. Mark action as waiting for payment proof
         3. Response generator will wait for next message (payment proof)
         """
+        payment_methods = await self._get_payment_methods_enabled(context)
+        if payment_methods.get("bank_qr") and await self._handle_bank_qr_flow(context):
+            return
+
         qr_url = await self._get_qr_payment_url(context)
-        
+
         self.log_info(
             "qr_payment_flow_started",
             tenant_id=context.tenant_id,
@@ -467,6 +483,93 @@ class ActionExecutorStage(BasePipelineStage):
                 "error": str(e)
             }
     
+    async def _handle_bank_qr_flow(self, context: PipelineContext) -> bool:
+        """
+        Charge with a single-use bank QR for the exact cart total (SIP, see app/services/bank_qr.py).
+        Returns False when it cannot (no total, unsupported currency, service down), so the
+        caller falls back to the static QR image.
+        """
+        items = context.cart_contents.get("items") or []
+        total = bank_qr.cart_total(items)
+        if total <= 0:
+            self.log_error("bank_qr_no_total", conversation_id=context.conversation_id)
+            return False
+        currency = await bank_qr.tenant_currency(context.tenant_id)
+        if currency not in bank_qr.SUPPORTED_CURRENCIES:
+            self.log_error("bank_qr_unsupported_currency", currency=currency)
+            return False
+
+        previous = bank_qr.pending_charge(context.cart_contents)
+        if previous:
+            # A new QR replaces the old one: it must not be payable anymore
+            try:
+                await bank_qr.disable_charge(previous["alias"])
+            except bank_qr.BankQrError as e:
+                self.log_error("bank_qr_disable_failed", alias=previous.get("alias"), error=str(e))
+
+        try:
+            charge = await bank_qr.create_charge(
+                context.tenant_id, total, currency, bank_qr.glosa(context.conversation_id, context.lead_id)
+            )
+            object_key = f"payments/bank_qr/tenant_{context.tenant_id}/{charge['alias']}.png"
+            from app.services import r2_storage
+            await r2_storage.upload_bytes(object_key, bank_qr.qr_png(charge), "image/png")
+            qr_url = r2_storage.get_presigned_url(object_key, expires_in=900)
+        except Exception as e:
+            self.log_error("bank_qr_create_failed", error=str(e), error_type=type(e).__name__)
+            return False
+
+        amount = bank_qr.amount_label(total, currency)
+        greeting = f"¡Hola {context.profile_name}! " if context.profile_name else ""
+        body = (
+            f"{greeting}Tu total es de *{amount}*. 🧾\n\n"
+            f"Escanea este QR con la app de cualquier banco. Es solo para este pedido y vence el "
+            f"{charge.get('fechaVencimiento', '')}.\n\n"
+            f"Cuando pagues, el banco nos avisa y te confirmamos al instante: no hace falta que envíes el comprobante."
+        )
+        try:
+            from app.integrations.whatsapp.client import send_whatsapp_message
+            await send_whatsapp_message(to=context.sender_phone, body=body,
+                                        from_number=context.recipient_phone, media_url=qr_url)
+        except Exception as e:
+            self.log_error("bank_qr_send_failed", error=str(e))
+            try:
+                await bank_qr.disable_charge(charge["alias"])
+            except bank_qr.BankQrError:
+                pass
+            return False
+
+        context.cart_contents["payment_method"] = "qr"
+        context.cart_contents["bank_qr"] = {
+            "alias": charge["alias"],
+            "amount": str(total),
+            "currency": currency,
+            "expires": charge.get("fechaVencimiento"),
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        context.current_state = ConversationState.AWAITING_RECEIPT
+        context.action_type = "awaiting_bank_payment"
+        context.action_result = {"action": "awaiting_bank_payment", "qr_sent": True, "amount": amount}
+        context.response_already_sent = True
+        context.response_text = f"📲 [QR del banco por {amount} enviado al cliente]"
+        self.log_info("bank_qr_sent", alias=charge["alias"], amount=str(total), currency=currency)
+        return True
+
+    async def _bank_qr_paid(self, context: PipelineContext, charge: dict) -> bool:
+        """Ask the bank whether the pending QR was paid; if so the sale is recorded and the customer told."""
+        outcome = await bank_qr.check_and_confirm(charge["alias"], source="customer_message")
+        if outcome not in ("recorded", "already_recorded"):
+            return False
+        context.cart_contents["bank_qr"] = {**charge, "status": "paid"}
+        context.current_state = ConversationState.ORDER_COMPLETED
+        context.action_type = "bank_payment_confirmed"
+        context.action_result = {"action": "bank_payment_confirmed"}
+        # confirm_payment already sent the confirmation to the customer
+        context.response_already_sent = True
+        context.response_text = "✅ [Pago confirmado por el banco]"
+        return True
+
     async def _is_sale_complete(self, context: PipelineContext) -> bool:
         """
         Determine if the purchase intent represents a completed sale.

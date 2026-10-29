@@ -79,6 +79,15 @@ class Settings(BaseSettings):
     r2_secret_access_key: str = ""
     r2_bucket_name: str = "yeison-storage"
 
+    # Bank QR through SIP (BMSCYeisonQRGenerator): URL and x-api-key of that service. Empty = off,
+    # agents keep the static QR image. bank_qr_notify_key is the key that service sends with its
+    # payment notices (its PAYMENT_NOTIFY_KEY).
+    bank_qr_api_url: Optional[str] = None
+    bank_qr_api_key: Optional[str] = None
+    bank_qr_notify_key: Optional[str] = None
+    bank_qr_timeout_seconds: float = 25.0
+    bank_qr_poll_seconds: int = 60
+
     class Config:
         env_file = ".env"
         case_sensitive = False

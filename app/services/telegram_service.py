@@ -188,3 +188,36 @@ async def send_purchase_intent_notification(
         logger.error("telegram_purchase_intent_failed", error=str(e), response=e.response.text)
     except Exception as e:
         logger.error("telegram_purchase_intent_error", error=str(e))
+
+
+async def send_bank_qr_paid_notification(chat_id: str, sale_data: dict) -> None:
+    """Tell the supervisor a bank QR payment was confirmed by the bank. Nothing to approve."""
+    if not settings.telegram_bot_token:
+        return
+
+    checkout_str = "\n".join(f"    • {k}: {v}" for k, v in (sale_data.get("checkout_data") or {}).items()) or "    • N/A"
+    items_str = "\n".join(
+        f"    • {i.get('name') or i.get('product_name', 'Producto')} x{int(i.get('quantity', 1))}"
+        for i in sale_data.get("items") or []
+    ) or "    • N/A"
+    invoice_line = (
+        "🧾 <b>Pide factura</b> (su NIT/CI y razón social están en los datos)\n"
+        if sale_data.get("invoice_requested") else ""
+    )
+    sale_line = f"🧾 Venta #{sale_data['sale_id']} registrada.\n" if sale_data.get("sale_id") else ""
+    text = (
+        f"✅ <b>PAGO CONFIRMADO POR EL BANCO (QR)</b>\n\n"
+        f"📱 <b>Teléfono:</b> {sale_data.get('phone', 'N/A')}\n"
+        f"📋 <b>Items:</b>\n{items_str}\n"
+        f"💰 <b>Pagado:</b> {sale_data.get('total_price', '')}\n{invoice_line}{sale_line}\n"
+        f"📝 <b>Datos de entrega:</b>\n{checkout_str}\n\n"
+        f"ℹ️ No hace falta aprobar: el cliente ya recibió la confirmación. Prepara el pedido."
+    )
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            response.raise_for_status()
+        logger.info("telegram_bank_qr_paid_sent", chat_id=chat_id)
+    except Exception as e:
+        logger.error("telegram_bank_qr_paid_failed", error=str(e))

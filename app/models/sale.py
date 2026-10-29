@@ -35,6 +35,8 @@ class Sale(Base):
     exchange_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 8), nullable=True)
     # Y-44: the customer asked for an invoice: {tax_id, name, requested_at}
     invoice_request: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    # Bank QR: alias of the paid QR (unique, so a payment is never recorded twice)
+    payment_reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

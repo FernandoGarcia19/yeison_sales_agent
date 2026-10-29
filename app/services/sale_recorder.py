@@ -1,7 +1,7 @@
 """
 Record a confirmed sale in the `sale` table (Y-12).
 
-Called when the supervisor approves an order. Amounts are computed here from
+Called when the supervisor approves an order, or when the bank confirms a QR payment (bank_qr). Amounts are computed here from
 the stored cart (Decimal, never float); the LLM never decides them.
 """
 
@@ -50,6 +50,7 @@ async def record_sale(
     conversation: SalesConversation,
     agent: AgentInstance,
     payment_method: str,
+    payment_reference: Optional[str] = None,
 ) -> Optional[Sale]:
     """
     Create the sale for the conversation's current purchase cycle, once.
@@ -100,6 +101,7 @@ async def record_sale(
         sale_items=items,
         currency=base_currency,
         invoice_request=build_invoice_request(conversation.cart_contents),
+        payment_reference=payment_reference,
     )
     db.add(sale)
     await db.flush()

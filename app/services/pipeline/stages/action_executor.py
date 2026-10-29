@@ -1086,7 +1086,8 @@ class ActionExecutorStage(BasePipelineStage):
         """
         context.action_type = "handoff_request"
         settings_ = (context.agent_config or {}).get("conversation_settings") or {}
-        previous = context.current_state.value if context.current_state else "browsing"
+        # The state arrives as the enum or as the stored text, depending on where the conversation came from
+        previous = getattr(context.current_state, "value", context.current_state) or "browsing"
         handoff.pause(context.cart_contents, previous, settings_.get("pause_hours"))
         context.current_state = ConversationState.PAUSED
 

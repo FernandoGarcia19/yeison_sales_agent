@@ -9,7 +9,9 @@ from openai import AsyncOpenAI
 from app.schemas.pipeline import PipelineContext, IntentType
 from app.services.pipeline.base import BasePipelineStage
 from app.integrations.whatsapp.client import send_whatsapp_message
+from app.integrations.whatsapp.formatting import to_whatsapp
 from app.core.config import settings
+from app.core.money import label as currency_label, money
 from app.services import llm_usage
 from app.services.pipeline.llm_models import model_for, request_options
 
@@ -108,7 +110,6 @@ class ResponseGeneratorStage(BasePipelineStage):
         
         try:
             response = await self._generate_ai_response(context)
-            return response
         except Exception as e:
             self.log_error(
                 "ai_generation_failed",
@@ -116,7 +117,13 @@ class ResponseGeneratorStage(BasePipelineStage):
                 falling_back_to="template"
             )
             # Fallback to template-based responses
-            return self._generate_fallback_response(context)
+            response = self._generate_fallback_response(context)
+        return to_whatsapp(response)
+
+    @staticmethod
+    def _currency(context: PipelineContext) -> str:
+        """The business's currency, loaded with the agent configuration (context_builder)."""
+        return ((context.agent_config or {}).get("tenant_info") or {}).get("currency") or "BOB"
     
     async def _generate_ai_response(self, context: PipelineContext) -> str:
         """Generate response using AI/LLM."""
@@ -226,7 +233,12 @@ class ResponseGeneratorStage(BasePipelineStage):
         # Get additional business context from new config structure
         product_info = agent_config.get("product_info", {})
         operations_info = agent_config.get("operations_info", {})
-        
+
+        currency = self._currency(context)
+        price_rule = f"Escribe los precios en {currency_label(currency)}, por ejemplo «{money(25, currency)}»"
+        if currency_label(currency) != "$":
+            price_rule += "; nunca uses «$» ni otra moneda"
+
         system_prompt = f"""Eres {agent_name}, un asistente virtual de ventas para {company_name}.
 
 INFORMACIÓN DE LA EMPRESA:
@@ -321,6 +333,8 @@ PERSONALIDAD Y ESTILO:
 - Emojis: {emoji_guide}
 - Longitud de respuesta: {length_guide}
 - SIEMPRE responde en ESPAÑOL
+- {price_rule}
+- Escribes por WhatsApp: para resaltar usa *un asterisco* (nunca **dos**); sin títulos con #, sin tablas
 
 CAPACIDADES:
 - Responder preguntas sobre productos y servicios
@@ -374,7 +388,7 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
             prompt += "PRODUCTOS RELEVANTES:\n"
             for product in context.relevant_products[:5]:
                 prompt += f"- {product.get('name', 'N/A')}\n"
-                prompt += f"  Precio: ${product.get('price', 'N/A')}\n"
+                prompt += f"  Precio: {money(product.get('price', 'N/A'), self._currency(context))}\n"
                 prompt += f"  Disponibilidad: {product.get('quantity', 0)} unidades\n"
                 if product.get('description'):
                     desc = product['description'][:100]
@@ -394,6 +408,12 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
             prompt += "RESULTADO DE ACCIÓN EJECUTADA:\n"
             prompt += f"Acción: {context.action_type}\n"
             prompt += f"Resultado: {json.dumps(context.action_result, ensure_ascii=False)}\n\n"
+            if context.action_result.get("action") == "qualify_lead":
+                # The customer has not confirmed: the order does not exist yet
+                prompt += (
+                    "EL PEDIDO TODAVÍA NO ESTÁ CONFIRMADO NI REGISTRADO: no digas que está confirmado, listo o registrado. "
+                    "Resume lo que quiere (producto, cantidad y total) y pregúntale si confirma el pedido.\n\n"
+                )
         
         prompt += """Genera una respuesta natural y útil para el usuario basándote en toda la información proporcionada.
 NO repitas lo que el usuario dijo, simplemente responde de manera natural y útil."""
@@ -471,7 +491,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         
         response = "Tenemos estos productos disponibles:\n\n"
         for product in products[:3]:  # Limit to 3 products
-            response += f"• {product['name']} - ${product['price']}\n"
+            response += f"• {product['name']} - {money(product['price'], self._currency(context))}\n"
             response += f"  {product['description'][:50]}...\n\n"
         
         response += "¿Te interesa alguno en particular?"
@@ -486,7 +506,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         
         response = "Aquí están los precios:\n\n"
         for product in products[:3]:
-            response += f"• {product['name']}: ${product['price']}\n"
+            response += f"• {product['name']}: {money(product['price'], self._currency(context))}\n"
         
         return response
     
@@ -537,7 +557,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
             elif action == "qr_payment_failed":
                 return "Disculpa, tuvimos un problema al enviar el QR. Por favor intenta de nuevo o contacta con nuestro equipo."
             elif action == "qualify_lead":
-                return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Cuál plan te interesa? (Plan Estándar $100/mes o Plan Premium $200/mes)"
+                return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Qué producto quieres y cuántas unidades?"
 
         # Default response
         return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Qué producto te gustaría adquirir?"

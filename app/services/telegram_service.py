@@ -3,6 +3,7 @@ import httpx
 import structlog
 from app.core import simulation
 from app.core.config import settings
+from app.core.money import money
 
 logger = structlog.get_logger()
 
@@ -53,7 +54,8 @@ async def send_payment_approval_request(
         unit_price = float(item.get("price", 0))
         subtotal = unit_price * qty
         if unit_price:
-            return f"    • {name} x{qty} @ ${unit_price:.2f} = <b>${subtotal:.2f}</b>"
+            currency = sale_data.get("currency")
+            return f"    • {name} x{qty} @ {money(unit_price, currency)} = <b>{money(subtotal, currency)}</b>"
         return f"    • {name} x{qty}"
 
     items_str = "\n".join(_fmt_item(item) for item in items) or "    • N/A"
@@ -149,7 +151,8 @@ async def send_purchase_intent_notification(
         unit_price = float(item.get("price", 0))
         subtotal = unit_price * qty
         if unit_price:
-            return f"    • {name} x{qty} @ ${unit_price:.2f} = <b>${subtotal:.2f}</b>"
+            currency = sale_data.get("currency")
+            return f"    • {name} x{qty} @ {money(unit_price, currency)} = <b>{money(subtotal, currency)}</b>"
         return f"    • {name} x{qty}"
 
     items_str = "\n".join(_fmt_item(item) for item in items) or "    • N/A"

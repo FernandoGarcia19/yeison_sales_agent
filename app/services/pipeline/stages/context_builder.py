@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.base import BasePipelineStage
 from app.services.invoice_request import checkout_requirements
-from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant
+from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant, Tenant
 from app.core.database import get_session_factory
+from app.core.money import normalize as normalize_currency
 from app.core.redis_client import (
     cache_get,
     cache_set,
@@ -268,7 +269,7 @@ class ContextBuilderStage(BasePipelineStage):
             self.log_info(
                 "tenant_config_not_found",
                 tenant_id=agent.tenant_id,
-                message="No active tenant configuration found - using defaults"
+                note="No active tenant configuration found - using defaults"
             )
         
         # Build unified configuration
@@ -276,7 +277,13 @@ class ContextBuilderStage(BasePipelineStage):
             agent_config=agent.configuration if agent.configuration else {},
             tenant_config=tenant_config
         )
-        
+
+        # Prices are written in the business's currency (Bs for a business without one set)
+        base_currency = (await db.execute(
+            select(Tenant.base_currency).where(Tenant.id == agent.tenant_id)
+        )).scalar_one_or_none()
+        config.setdefault("tenant_info", {})["currency"] = normalize_currency(base_currency)
+
         return config
     
     def _merge_configurations(

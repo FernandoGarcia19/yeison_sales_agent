@@ -49,7 +49,3 @@ class InventoryTenant(Base, TimestampMixin, ActiveMixin):
         """Check if product is in stock. Untracked items (quantity=None) are always available."""
         return self.active and (self.quantity is None or self.quantity > 0)
 
-    @property
-    def formatted_price(self) -> str:
-        """Return formatted price string."""
-        return f"${self.price:.2f}"

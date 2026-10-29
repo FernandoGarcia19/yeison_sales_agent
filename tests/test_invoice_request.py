@@ -82,7 +82,8 @@ async def test_asking_marks_the_cart_and_adds_the_fields(executor):
     context = _context("quiero factura")
     await executor._note_invoice_request(context)
     assert context.cart_contents["invoice_requested"] is True
-    assert executor._get_checkout_requirements(context)[-2:] == ["NIT", INVOICE_NAME_FIELD]
+    # Y-58: NIT is no longer asked by default, so the invoice adds both its fields
+    assert executor._get_checkout_requirements(context)[-2:] == [INVOICE_TAX_ID_FIELD, INVOICE_NAME_FIELD]
 
 
 async def test_a_business_that_does_not_invoice_collects_nothing(executor):
@@ -90,7 +91,8 @@ async def test_a_business_that_does_not_invoice_collects_nothing(executor):
     context = _context("quiero factura")
     await executor._note_invoice_request(context)
     assert "invoice_requested" not in context.cart_contents
-    assert executor._get_checkout_requirements(context) == ["Nombre completo", "Dirección de entrega", "NIT"]
+    # Y-58: without delivery settings the customer first says pickup or delivery; no NIT without an invoice
+    assert executor._get_checkout_requirements(context) == ["Entrega (retiro en tienda o envío)", "Nombre completo"]
 
 
 async def test_other_messages_change_nothing(executor):

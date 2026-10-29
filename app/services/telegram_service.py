@@ -236,3 +236,29 @@ async def send_bank_qr_paid_notification(chat_id: str, sale_data: dict) -> None:
         logger.info("telegram_bank_qr_paid_sent", chat_id=chat_id)
     except Exception as e:
         logger.error("telegram_bank_qr_paid_failed", error=str(e))
+
+
+async def send_handoff_notification(chat_id: str, data: dict) -> None:
+    """A customer asked for a person; the agent stays quiet with them until «Reanudar agente» (Y-58)."""
+    if not settings.telegram_bot_token:
+        return
+    who = f"{data.get('name')} ({data.get('phone')})" if data.get("name") else data.get("phone", "N/A")
+    text = (
+        f"🙋 <b>UN CLIENTE PIDE HABLAR CON UNA PERSONA</b>\n\n"
+        f"📱 <b>Cliente:</b> {who}\n"
+        f"💬 <b>Escribió:</b> {data.get('message', '')}\n\n"
+        f"El agente dejó de responderle. Escríbele por WhatsApp; cuando termines, toca «Reanudar agente»."
+    )
+    buttons = {"inline_keyboard": [[{"text": "▶️ Reanudar agente", "callback_data": f"resume_agent_{data.get('conversation_id', '0')}"}]]}
+    if simulation.current():
+        simulation.capture("telegram", text=text, buttons=["▶️ Reanudar agente"])
+        return
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                                                    "reply_markup": json.dumps(buttons)})
+            response.raise_for_status()
+        logger.info("telegram_handoff_sent", chat_id=chat_id)
+    except Exception as e:
+        logger.error("telegram_handoff_failed", error=str(e))

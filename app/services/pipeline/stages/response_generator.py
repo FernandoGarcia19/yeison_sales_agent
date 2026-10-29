@@ -12,7 +12,7 @@ from app.integrations.whatsapp.client import send_whatsapp_message
 from app.integrations.whatsapp.formatting import to_whatsapp
 from app.core.config import settings
 from app.core.money import label as currency_label, money
-from app.services import cart
+from app.services import cart, delivery
 from app.services import llm_usage
 from app.services.pipeline.llm_models import model_for, request_options
 
@@ -306,6 +306,8 @@ TÉCNICAS DE CIERRE:
 {operations_info['closing_techniques']}
 """
         
+        system_prompt += "\n" + delivery.prompt_section(agent_config.get("delivery") or delivery.from_operations(None))
+
         if brand_voice:
             system_prompt += f"""
 VOZ DE MARCA:
@@ -423,6 +425,17 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
         # Add action result if available
         if context.action_result:
             action = context.action_result.get("action")
+            if action == "handoff":
+                prompt += ("EL CLIENTE PIDIÓ HABLAR CON UNA PERSONA: dile en una línea que una persona del equipo le escribirá "
+                           "por este chat" + ("" if context.action_result.get("notified") else
+                                              " (todavía no pudimos avisar al equipo: pídele que espere un momento)") +
+                           ". No sigas vendiendo.\n\n")
+            elif context.action_type in ("product_inquiry", "pricing_inquiry", "availability_check"):
+                prompt += ("Si el cliente muestra interés en un producto, termina con una pregunta que lo lleve a pedir "
+                           "(por ejemplo «¿Te preparo 2?»).\n\n")
+            if context.action_result.get("previous_order_discarded"):
+                prompt += ("El cliente vuelve después de un tiempo: su pedido anterior sin pagar se descartó. Salúdalo y, "
+                           "si corresponde, pregúntale si quiere armarlo de nuevo.\n\n")
             if action == "collect_checkout_data" and items:
                 # Y-56: the customer sees what they are buying before giving their data
                 prompt += "Antes de pedir los datos, muestra el pedido (CARRITO ACTUAL) con su total.\n\n"
@@ -647,13 +660,14 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
                         intent_confidence=context.intent_confidence
                     )
                 
-                # Add single assistant response (whether batch or not)
-                conversation.add_message(
-                    role="assistant",
-                    content=context.response_text,
-                    message_sid=context.action_result.get("message_sid") if context.action_result else None,
-                    action_type=context.action_type
-                )
+                # Add single assistant response (whether batch or not); none while a person attends (paused)
+                if context.response_text:
+                    conversation.add_message(
+                        role="assistant",
+                        content=context.response_text,
+                        message_sid=context.action_result.get("message_sid") if context.action_result else None,
+                        action_type=context.action_type
+                    )
                 
                 # Update state machine fields
                 if context.current_state is not None:

@@ -64,7 +64,9 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         # Must answer immediately — this dismisses the loading spinner on the button.
         await _answer_callback_query(callback_id)
 
-        if callback_data.startswith("approve_sale_") or callback_data.startswith("reject_sale_"):
+        if callback_data.startswith("resume_agent_") and chat_id:
+            background_tasks.add_task(_resume_agent, callback_data, str(chat_id))
+        elif callback_data.startswith("approve_sale_") or callback_data.startswith("reject_sale_"):
             background_tasks.add_task(
                 process_telegram_callback,
                 callback_data=callback_data,
@@ -371,6 +373,20 @@ async def _answer_callback_query(callback_id: str, text: str = "") -> None:
             await client.post(url, json={"callback_query_id": callback_id, "text": text})
     except Exception as e:
         logger.error("telegram_answer_callback_failed", error=str(e))
+
+
+async def _resume_agent(callback_data: str, chat_id: str) -> None:
+    """«Reanudar agente»: the agent answers this customer again (Y-58)."""
+    from app.services import handoff
+
+    try:
+        conversation_id = int(callback_data.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return
+    phone = await handoff.resume_conversation(conversation_id)
+    text = (f"▶️ El agente volvió a atender a {phone}." if phone
+            else "Esa conversación ya no estaba en pausa.")
+    await _send_telegram_message(chat_id, text)
 
 
 async def process_telegram_callback(callback_data: str, chat_id: int, message_id: int, original_caption: str = ""):

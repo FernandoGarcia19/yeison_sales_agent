@@ -36,9 +36,13 @@ def is_invoice_field(name: str) -> bool:
     return name in (INVOICE_TAX_ID_FIELD, INVOICE_NAME_FIELD)
 
 
-def checkout_requirements(configured: Optional[List[str]], invoice_requested: bool) -> List[str]:
+def checkout_requirements(configured: Optional[List[str]], invoice_requested: bool,
+                          default: Optional[List[str]] = None) -> List[str]:
     """The fields to collect before paying: the agent's own, plus the invoice data when the customer asked."""
-    fields = list(configured) if isinstance(configured, list) and configured else list(DEFAULT_CHECKOUT)
+    if isinstance(configured, list) and configured:
+        fields = list(configured)
+    else:
+        fields = list(default) if default is not None else list(DEFAULT_CHECKOUT)
     if not invoice_requested:
         return fields
     if not any(_TAX_ID_KEY.search(f) for f in fields):

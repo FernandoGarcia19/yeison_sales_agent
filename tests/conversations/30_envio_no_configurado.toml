@@ -1,6 +1,5 @@
-name = "No inventa envíos que el negocio no configuró"
+name = "No promete envíos fuera de las zonas configuradas (La Paz y El Alto)"
 agent = "moda"
-known_issue = "Y-58"
 
 [[turns]]
 say = "Quiero 1 bolso de aguayo"

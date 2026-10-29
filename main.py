@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 
@@ -6,6 +8,8 @@ from app.core.database import close_db_connections
 from app.core.redis_client import close_redis_connection
 from app.api.v1.webhooks import router as webhook_router
 from app.api.v1.telegram_webhook import router as telegram_webhook_router
+from app.api.v1.internal_payments import router as internal_payments_router
+from app.services import bank_qr
 
 
 @asynccontextmanager
@@ -13,9 +17,12 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager - handles startup and shutdown."""
     # Startup
     print(f"Starting {settings.app_name} v{settings.version}")
+    poller = asyncio.create_task(bank_qr.run_poller()) if bank_qr.is_configured() else None
     yield
     # Shutdown
     print("Shutting down...")
+    if poller:
+        poller.cancel()
     await close_db_connections()
     await close_redis_connection()
 
@@ -31,6 +38,7 @@ app = FastAPI(
 # Include routers
 app.include_router(webhook_router, prefix="/api/v1")
 app.include_router(telegram_webhook_router, prefix="/api/v1")
+app.include_router(internal_payments_router, prefix="/api/v1")
 
 # Basic route
 @app. get("/")

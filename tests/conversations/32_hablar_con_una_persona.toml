@@ -1,0 +1,14 @@
+name = "Pedir una persona pausa al agente y avisa al supervisor"
+agent = "moda"
+
+[[turns]]
+say = "Quiero 1 bolso de aguayo"
+expect = { cart = { "Bolso de aguayo" = 1 } }
+
+[[turns]]
+say = "Mejor quiero hablar con una persona"
+expect = { state = "paused", supervisor = true, says_any = [["persona", "equipo", "asesor"]] }
+
+[[turns]]
+say = "¿hola?"
+expect = { state = "paused", reply = false }

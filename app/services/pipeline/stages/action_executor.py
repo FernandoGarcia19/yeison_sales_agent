@@ -5,7 +5,7 @@ Action executor stage - executes actions based on intent.
 import json
 from typing import Optional, List
 from sqlalchemy import select, text, update
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from openai import AsyncOpenAI
 
@@ -17,7 +17,7 @@ from app.core.database import get_session_factory
 from app.core import simulation
 from app.core.config import settings
 from app.core.money import money
-from app.services import bank_qr, cart, invoice_request, llm_usage, purchase_confirmation
+from app.services import bank_qr, cart, delivery, handoff, invoice_request, llm_usage, purchase_confirmation
 from app.services.pipeline.llm_models import model_for, request_options
 
 
@@ -65,7 +65,30 @@ class ActionExecutorStage(BasePipelineStage):
             action_type=context.action_type
         )
 
+        # A person took over this customer: stay quiet until resumed or the pause ends (Y-58)
+        if context.current_state == ConversationState.PAUSED:
+            if handoff.is_paused(context.cart_contents):
+                context.action_type = "paused"
+                context.action_result = {"action": "paused"}
+                context.response_already_sent = True
+                context.response_text = None
+                return context
+            context.current_state = ConversationState(handoff.resume(context.cart_contents))
+
+        settings_ = (context.agent_config or {}).get("conversation_settings") or {}
+        if context.intent == IntentType.HANDOFF_REQUEST or handoff.asks_for_person(
+            context.message_body, settings_.get("handoff_to_human_keywords")
+        ):
+            await self._handle_handoff_request(context)
+            return context
+
+        # A cart left untouched too long is dropped; the reply welcomes the customer back (Y-58)
+        stale_cart = context.current_state in CART_STATES and self._cart_is_stale(context)
+        if stale_cart:
+            self._clear_cart(context)
+
         await self._note_invoice_request(context)
+        self._note_delivery_method(context)
 
         # Changes to the cart before paying: add, change, remove or cancel (Y-56)
         if (
@@ -153,13 +176,36 @@ class ActionExecutorStage(BasePipelineStage):
         else:
             await self._handle_general_question(context)
         
+        if stale_cart:
+            context.action_result = {**(context.action_result or {}), "previous_order_discarded": True}
+
         self.log_info(
             "action_executed",
             action_type=context.action_type
         )
-        
+
         return context
-    
+
+    def _note_delivery_method(self, context: PipelineContext) -> None:
+        """«Paso a recogerlo» / «envíamelo a casa»: how the order leaves the shop decides what is asked."""
+        if context.current_state not in (None, ConversationState.BROWSING, *CART_STATES):
+            return
+        method = delivery.detect_method(context.message_body)
+        options = (context.agent_config or {}).get("delivery") or delivery.from_operations(None)
+        if method and method in delivery.methods(options):
+            context.cart_contents["delivery_method"] = method
+
+    def _cart_is_stale(self, context: PipelineContext) -> bool:
+        settings_ = (context.agent_config or {}).get("conversation_settings") or {}
+        minutes = settings_.get("session_timeout_minutes") or 24 * 60
+        last = next((m.get("timestamp") for m in reversed(context.conversation_history or []) if m.get("timestamp")), None)
+        if not last:
+            return False
+        try:
+            return datetime.utcnow() - datetime.fromisoformat(last) > timedelta(minutes=float(minutes))
+        except (TypeError, ValueError):
+            return False
+
     async def _handle_product_inquiry(self, context: PipelineContext):
         """Handle product inquiry intent."""
         context.action_type = "product_inquiry"
@@ -656,9 +702,8 @@ class ActionExecutorStage(BasePipelineStage):
         self.log_info("invoice_requested")
 
     def _get_checkout_requirements(self, context: PipelineContext) -> List[str]:
-        """Required checkout fields from the agent config, plus the invoice data when the customer asked."""
-        configured = context.agent_config.get("checkout_requirements") if context.agent_config else None
-        return invoice_request.checkout_requirements(configured, bool(context.cart_contents.get("invoice_requested")))
+        """Checkout fields by delivery method (Y-58), or the agent's own list; invoice data on top."""
+        return delivery.requirements(context.agent_config, context.cart_contents)
 
     async def _extract_checkout_fields(
         self,
@@ -883,6 +928,19 @@ class ActionExecutorStage(BasePipelineStage):
             context.cart_contents["checkout_data"] = context.checkout_data
             self.log_info("checkout_fields_extracted", fields=list(extracted.keys()))
 
+        # "Retiro en tienda" or "envío" decides whether an address is needed (Y-58)
+        choice = context.checkout_data.get(delivery.METHOD_FIELD)
+        if choice and not context.cart_contents.get("delivery_method"):
+            method = delivery.detect_method(choice)
+            if method:
+                context.cart_contents["delivery_method"] = method
+            else:
+                context.checkout_data.pop(delivery.METHOD_FIELD, None)
+        if context.cart_contents.get("delivery_method"):
+            context.checkout_data[delivery.METHOD_FIELD] = delivery.method_label(context.cart_contents["delivery_method"])
+            context.cart_contents["checkout_data"] = context.checkout_data
+        required_fields = self._get_checkout_requirements(context)
+
         missing_fields = [f for f in required_fields if not context.checkout_data.get(f)]
 
         if missing_fields:
@@ -1023,46 +1081,49 @@ class ActionExecutorStage(BasePipelineStage):
     
     async def _handle_handoff_request(self, context: PipelineContext):
         """
-        Handle handoff request - customer wants to talk to a human.
-        Notifies supervisor immediately.
+        The customer wants a person: pause the agent for this customer (Y-58) and tell the supervisor
+        on WhatsApp and Telegram, where «Reanudar agente» gives the conversation back to the agent.
         """
         context.action_type = "handoff_request"
-        
-        # Get supervisor number from agent config
-        supervisor_number = context.agent_config.get("integrations", {}).get("supervisor_number")
-        
+        settings_ = (context.agent_config or {}).get("conversation_settings") or {}
+        previous = context.current_state.value if context.current_state else "browsing"
+        handoff.pause(context.cart_contents, previous, settings_.get("pause_hours"))
+        context.current_state = ConversationState.PAUSED
+
+        customer_name = context.profile_name or (context.lead_info or {}).get("name")
+        summary = self._create_conversation_summary(context.conversation_history)
+        notified = False
+
+        supervisor_number = (context.agent_config.get("integrations") or {}).get("supervisor_number")
         if supervisor_number:
-            customer_name = context.profile_name or context.lead_info.get("name") if context.lead_info else None
-            conversation_context = self._create_conversation_summary(context.conversation_history)
-            
             try:
-                await NotificationService.notify_handoff_request(
+                notified = await NotificationService.notify_handoff_request(
                     supervisor_number=supervisor_number,
                     agent_phone=context.recipient_phone,
                     customer_phone=context.sender_phone,
                     customer_name=customer_name,
-                    reason="Cliente solicitó hablar con un humano",
-                    conversation_context=conversation_context
-                )
-                
-                self.log_info(
-                    "handoff_notification_sent",
-                    supervisor=supervisor_number,
-                    customer=context.sender_phone
-                )
-                
-                context.action_result = {"notified": True}
-                
+                    reason="Cliente solicitó hablar con una persona",
+                    conversation_context=summary,
+                ) or notified
             except Exception as e:
-                self.log_error(
-                    "failed_to_notify_handoff",
-                    error=str(e)
-                )
-                context.action_result = {"notified": False, "error": str(e)}
-        else:
-            self.log_error("no_supervisor_for_handoff")
-            context.action_result = {"notified": False, "error": "No supervisor configured"}
-    
+                self.log_error("failed_to_notify_handoff", error=str(e))
+
+        tg_config = (context.agent_config.get("integrations") or {}).get("telegram") or {}
+        if settings.telegram_bot_token and tg_config.get("enabled") and tg_config.get("supervisor_chat_id"):
+            from app.services import telegram_service
+            await telegram_service.send_handoff_notification(tg_config["supervisor_chat_id"], {
+                "phone": context.sender_phone,
+                "name": customer_name,
+                "message": context.message_body,
+                "summary": summary,
+                "conversation_id": str(context.conversation_id or ""),
+            })
+            notified = True
+
+        if not notified:
+            self.log_error("no_supervisor_for_handoff", agent_instance_id=context.agent_instance_id)
+        context.action_result = {"action": "handoff", "notified": notified}
+
     async def _handle_payment_proof_received(self, context: PipelineContext):
         """
         Handle payment proof submission from customer.

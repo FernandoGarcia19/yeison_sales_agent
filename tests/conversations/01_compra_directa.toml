@@ -6,8 +6,8 @@ say = "Quiero 2 packs de medias"
 expect = { state = "fulfillment_coord", cart = { "Medias pack x3" = 2 }, supervisor = false }
 
 [[turns]]
-say = "Luis Mamani, Av. 6 de Agosto 100, NIT 4455667"
-expect = { state = "awaiting_receipt", collected = ["Nombre completo", "Dirección de entrega", "NIT"], payment = "physical", supervisor = true, actions = ["approve", "reject"] }
+say = "Luis Mamani, envíamelo a Av. 6 de Agosto 100"
+expect = { state = "awaiting_receipt", collected = ["Nombre completo", "Dirección de entrega", "Entrega (retiro en tienda o envío)"], payment = "physical", supervisor = true, actions = ["approve", "reject"] }
 
 [[turns]]
 action = "approve"

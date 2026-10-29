@@ -10,5 +10,5 @@ say = "Agrégame también una gorra Illimani"
 expect = { state = "fulfillment_coord", cart = { "Medias pack x3" = 2, "Gorra bordada Illimani" = 1 }, says = ["Bs 130"] }
 
 [[turns]]
-say = "Luis Mamani, Av. 6 de Agosto 100, NIT 4455667"
+say = "Luis Mamani, envíamelo a Av. 6 de Agosto 100"
 expect = { state = "awaiting_receipt", cart = { "Medias pack x3" = 2, "Gorra bordada Illimani" = 1 }, supervisor = true }

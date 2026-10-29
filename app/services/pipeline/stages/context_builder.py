@@ -8,8 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.pipeline import ConversationState, PipelineContext
 from app.services.pipeline.base import BasePipelineStage
-from app.services import catalog_search, purchase_confirmation
-from app.services.invoice_request import checkout_requirements
+from app.services import catalog_search, delivery, purchase_confirmation
 from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant, Tenant
 from app.core.database import get_session_factory
 from app.core.money import normalize as normalize_currency
@@ -155,7 +154,7 @@ class ContextBuilderStage(BasePipelineStage):
         elif current_state == ConversationState.FULFILLMENT_COORD:
             invoice_asked = bool(context.cart_contents.get("invoice_requested"))
             missing = [
-                f for f in checkout_requirements((context.agent_config or {}).get("checkout_requirements"), invoice_asked)
+                f for f in delivery.requirements(context.agent_config, context.cart_contents)
                 if not context.checkout_data.get(f)
             ]
             collected_str = ", ".join(f"{k}: {v}" for k, v in context.checkout_data.items()) if context.checkout_data else "ninguno aún"
@@ -284,6 +283,13 @@ class ContextBuilderStage(BasePipelineStage):
         config = self._merge_configurations(
             agent_config=agent.configuration if agent.configuration else {},
             tenant_config=tenant_config
+        )
+
+        # How the business delivers (Y-58): the agent may only state this
+        business = (tenant_config.business or {}) if tenant_config else {}
+        config["delivery"] = delivery.from_operations(
+            tenant_config.operations if tenant_config else None,
+            business_address=business.get("address") or business.get("location"),
         )
 
         # Prices are written in the business's currency (Bs for a business without one set)

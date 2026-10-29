@@ -6,5 +6,5 @@ say_many = ["Hola", "quiero 2 packs de medias"]
 expect = { state = "fulfillment_coord", cart = { "Medias pack x3" = 2 }, says = ["Bs 70"] }
 
 [[turns]]
-say_many = ["Luis Mamani", "Av. 6 de Agosto 100", "NIT 4455667"]
-expect = { state = "awaiting_receipt", collected = ["Nombre completo", "Dirección de entrega", "NIT"], supervisor = true }
+say_many = ["Luis Mamani", "envíamelo a Av. 6 de Agosto 100"]
+expect = { state = "awaiting_receipt", collected = ["Nombre completo", "Dirección de entrega", "Entrega (retiro en tienda o envío)"], supervisor = true }

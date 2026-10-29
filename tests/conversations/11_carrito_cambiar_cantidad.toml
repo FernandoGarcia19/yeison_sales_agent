@@ -1,0 +1,11 @@
+name = "Carrito: cambiar la cantidad"
+agent = "moda"
+known_issue = "Y-56"
+
+[[turns]]
+say = "Quiero 2 packs de medias"
+expect = { cart = { "Medias pack x3" = 2 } }
+
+[[turns]]
+say = "Mejor que sean 3 packs de medias"
+expect = { cart = { "Medias pack x3" = 3 } }

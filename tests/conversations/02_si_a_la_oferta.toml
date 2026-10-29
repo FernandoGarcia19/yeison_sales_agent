@@ -1,0 +1,10 @@
+name = "Un «sí» a la oferta del agente cierra la compra"
+agent = "moda"
+
+[[turns]]
+say = "Me interesa una chompa de alpaca"
+expect = { state = "browsing", cart = {}, not_says = ["confirmado", "registrado"] }
+
+[[turns]]
+say = "Sí"
+expect = { state = "fulfillment_coord", cart = { "Chompa de alpaca" = 1 } }

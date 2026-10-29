@@ -1,0 +1,10 @@
+name = "«Sí, confírmalo» después de pedir cantidad"
+agent = "demo"
+
+[[turns]]
+say = "Hola, quiero 2 galletas de quinua"
+expect = { state = "fulfillment_coord", cart = { "Galletas de quinua" = 2 }, says = ["Bs"] }
+
+[[turns]]
+say = "Sí, confírmalo"
+expect = { state = "fulfillment_coord", cart = { "Galletas de quinua" = 2 } }

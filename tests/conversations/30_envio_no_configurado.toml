@@ -1,0 +1,11 @@
+name = "No inventa envíos que el negocio no configuró"
+agent = "moda"
+known_issue = "Y-58"
+
+[[turns]]
+say = "Quiero 1 bolso de aguayo"
+expect = { cart = { "Bolso de aguayo" = 1 } }
+
+[[turns]]
+say = "¿Hacen envíos a Cochabamba?"
+expect = { not_matches = ["s[ií],? (hacemos|realizamos) env[ií]os", "hacemos env[ií]os a cochabamba"] }

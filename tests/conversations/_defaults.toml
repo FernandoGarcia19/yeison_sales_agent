@@ -1,0 +1,2 @@
+# Applied to every case: words the agent must never write
+never = ["$", "**"]

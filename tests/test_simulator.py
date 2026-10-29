@@ -34,6 +34,26 @@ def test_available_actions_follow_the_payment_step():
         ["pay", "receipt"]
 
 
+def test_a_paused_conversation_can_be_resumed():
+    # Y-58/Y-60: the supervisor's «Reanudar agente» button
+    assert simulator.available_actions({"current_state": "paused"}) == ["resume"]
+
+
+def test_understood_says_what_the_agent_made_of_the_message():
+    from types import SimpleNamespace
+
+    context = SimpleNamespace(
+        action_result={"action": "cart_updated", "cart_changes": ["Se agregó 1 x Gorra."], "missing_fields": ["Dirección de entrega"]},
+        cart_contents={"delivery_method": "delivery", "invoice_requested": True},
+    )
+    assert simulator.understood(context) == {
+        "cart_changes": ["Se agregó 1 x Gorra."], "missing_fields": ["Dirección de entrega"], "delivery_method": "delivery",
+        "invoice_requested": True, "previous_order_discarded": False, "handoff": False, "missing_product": False,
+    }
+    empty = simulator.understood(SimpleNamespace(action_result=None, cart_contents=None))
+    assert empty["cart_changes"] == [] and empty["delivery_method"] is None
+
+
 def test_capture_only_inside_a_run():
     with pytest.raises(RuntimeError):
         simulation.capture("whatsapp", body="x")
@@ -182,6 +202,21 @@ async def test_supervisor_approval_is_simulated(business, redis):
     texts = [e["text"] for e in view["events"]]
     assert any("confirmada" in t for t in texts)  # the customer's WhatsApp
     assert any("Se descontaría del stock: Polera básica x2" in t for t in texts)
+
+
+@needs_db
+async def test_resume_is_simulated(business, redis):
+    key = simulator._key(business["tenant_id"], business["agent_id"], "beef0002")
+    state = simulator._empty_state()
+    state.update(current_state="paused", cart_contents={"items": ITEMS, "state_before_pause": "cart_building",
+                                                        "paused_until": "2999-01-01T00:00:00"})
+    redis[key] = json.dumps(state)
+
+    view = await simulator.run_turn(business["tenant_id"], business["agent_id"], "beef0002", "resume")
+
+    assert view["state"] == "cart_building" and view["actions"] == []
+    assert view["transcript"][-1]["text"].startswith("👤 El supervisor reanudó")
+    assert await _counts(business["engine"], business["tenant_id"]) == (0, 0, 0)
 
 
 @needs_db

@@ -28,7 +28,7 @@ logger = structlog.get_logger()
 
 STATE_TTL = 24 * 3600
 CUSTOMER_NAME = "Cliente de prueba"
-ACTIONS = {"message", "receipt", "pay", "approve", "reject", "reset"}
+ACTIONS = {"message", "receipt", "pay", "approve", "reject", "resume", "reset"}
 
 
 class SimulatorError(Exception):
@@ -55,6 +55,9 @@ def _empty_state() -> Dict[str, Any]:
 def available_actions(state: Dict[str, Any]) -> List[str]:
     """What the test chat can do next besides writing: the buttons the screen shows."""
     cart = state.get("cart_contents") or {}
+    if state.get("current_state") == "paused":
+        # «Reanudar agente» from the supervisor's Telegram notice (Y-58)
+        return ["resume"]
     if state.get("current_state") != "awaiting_receipt":
         return []
     if (cart.get("bank_qr") or {}).get("status") == "pending":
@@ -124,6 +127,9 @@ async def _run_in_rollback(tenant_id: int, agent_id: int, session_id: str, state
             run.bank_charges[alias]["estado"] = "PAGADO"
             from app.services import bank_qr
             trace["outcome"] = await bank_qr.confirm_payment(alias, source="simulator")
+        elif action == "resume":
+            from app.services import handoff
+            await handoff.resume_conversation(conversation_id)
         else:
             from app.api.v1.telegram_webhook import process_telegram_callback
             await process_telegram_callback(f"{action}_sale_{conversation_id}", chat_id=None, message_id=None)
@@ -150,6 +156,9 @@ async def _run_in_rollback(tenant_id: int, agent_id: int, session_id: str, state
                                         "at": _now()})
     elif action == "pay":
         new_state["transcript"].append({"from": "system", "text": "🏦 El banco confirmó el pago (simulado)",
+                                        "at": _now()})
+    elif action == "resume":
+        new_state["transcript"].append({"from": "system", "text": "👤 El supervisor reanudó el agente en Telegram (simulado)",
                                         "at": _now()})
     else:
         label = "aprobó" if action == "approve" else "rechazó"
@@ -192,7 +201,22 @@ async def _customer_writes(phone: str, agent_phone: str, action: str, texts: Lis
     context = build_batch_context(queued, sender_phone=phone, recipient_phone=agent_phone)
     result = await PipelineRunner().run(context)
     return {"intent": result.intent, "agent_action": result.action_executed, "error": result.error,
-            "ms": round(result.processing_time_ms)}
+            "ms": round(result.processing_time_ms), "understood": understood(context)}
+
+
+def understood(context) -> Dict[str, Any]:
+    """What the agent made of the message, for the test chat's «Qué entendió» (Y-60)."""
+    result = context.action_result or {}
+    cart = context.cart_contents or {}
+    return {
+        "cart_changes": list(result.get("cart_changes") or []),
+        "missing_fields": list(result.get("missing_fields") or []),
+        "delivery_method": cart.get("delivery_method"),
+        "invoice_requested": bool(cart.get("invoice_requested")),
+        "previous_order_discarded": bool(result.get("previous_order_discarded")),
+        "handoff": result.get("action") == "handoff",
+        "missing_product": result.get("missing") == "product",
+    }
 
 
 async def _read_back(db: AsyncSession, conversation_id: int, previous: Dict[str, Any]) -> Dict[str, Any]:

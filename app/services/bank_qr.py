@@ -24,6 +24,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core import simulation
 from app.core.config import settings
+from app.core.money import money
 from app.core.database import get_session_factory
 from app.models import AgentInstance, Lead, SalesConversation, Tenant
 from app.models.conversation import ConversationState
@@ -37,7 +38,6 @@ SUPPORTED_CURRENCIES = {"BOB", "USD"}
 GLOSA_MAX = 30
 # Conversations older than this are no longer polled (QRs expire after SIP_QR_DIAS_VENCIMIENTO, 1 day)
 POLL_WINDOW = timedelta(days=2)
-CURRENCY_LABELS = {"BOB": "Bs", "USD": "US$"}
 
 
 class BankQrError(Exception):
@@ -63,7 +63,7 @@ def glosa(conversation_id: Optional[int], lead_id: Optional[int]) -> str:
 
 
 def amount_label(amount: Any, currency: str) -> str:
-    return f"{CURRENCY_LABELS.get(currency, currency)} {Decimal(str(amount)):.2f}"
+    return money(amount, currency)
 
 
 def pending_charge(cart_contents: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

@@ -16,7 +16,8 @@ from app.models import Lead, SalesConversation
 from app.core.database import get_session_factory
 from app.core import simulation
 from app.core.config import settings
-from app.services import bank_qr, invoice_request, llm_usage
+from app.core.money import money
+from app.services import bank_qr, invoice_request, llm_usage, purchase_confirmation
 from app.services.pipeline.llm_models import model_for, request_options
 
 
@@ -98,6 +99,16 @@ class ActionExecutorStage(BasePipelineStage):
         if context.action_type == "payment_proof_received":
             await self._handle_payment_proof_received(context)
         
+        # "Sí" / "dale" right after the agent offered the order: the classifier sees no
+        # purchase in two letters, but the customer is closing it
+        elif (
+            context.intent != IntentType.PURCHASE_INTENT
+            and context.current_state in (None, ConversationState.BROWSING, ConversationState.CART_BUILDING)
+            and purchase_confirmation.confirms_offer(context.message_body, context.conversation_history)
+        ):
+            context.intent = IntentType.PURCHASE_INTENT
+            await self._handle_purchase_intent(context)
+
         # Route to appropriate action based on intent
         elif context.intent == IntentType.PRODUCT_INQUIRY:
             await self._handle_product_inquiry(context)
@@ -237,42 +248,22 @@ class ActionExecutorStage(BasePipelineStage):
     
     async def _is_purchase_confirmed(self, context: PipelineContext) -> bool:
         """
-        Determine if the customer has confirmed their purchase.
-        
-        Uses keyword-based detection to identify purchase confirmation.
-        Does NOT require products in context since customer may have already
-        seen product info in previous messages.
+        Whether the customer closed the purchase with this message (app/services/purchase_confirmation.py):
+        a closing phrase ("confírmalo", "quiero pagar", "me llevo 2") or a "sí" to the agent's offer.
+        Does NOT require products in context: the customer may have seen them in earlier messages.
         """
-        message_lower = context.message_body.lower()
-        
-        # Keywords that indicate purchase confirmation
-        confirmation_keywords = [
-            "confirmo",
-            "confirmado",
-            "confirmar",
-            "compro",
-            "comprar",
-            "acepto",
-            "si, lo quiero",
-            "lo quiero",
-            "proceder con la compra",
-            "realizar el pago",
-            "hacer el pago",
-            "pagar ahora",
-            "enviar",
-            "quiero comprar",
-            "voy a comprar",
-            "compro el plan",
-            "quiero el plan",
-        ]
-        
-        # Check if any confirmation keyword is in the message
-        for keyword in confirmation_keywords:
-            if keyword in message_lower:
-                return True
-        
-        return False
-    
+        if purchase_confirmation.closes_purchase(context.message_body):
+            return True
+        if context.current_state == ConversationState.ORDER_COMPLETED:
+            # "ok, gracias" after a finished order is not a new one
+            return False
+        return purchase_confirmation.confirms_offer(context.message_body, context.conversation_history)
+
+    @staticmethod
+    def _currency(context: PipelineContext) -> str:
+        """The business's currency, loaded with the agent configuration (context_builder)."""
+        return ((context.agent_config or {}).get("tenant_info") or {}).get("currency") or "BOB"
+
     async def _is_qr_payment_enabled(self, context: PipelineContext) -> bool:
         """
         Check if QR payment is enabled for the active agent.
@@ -889,7 +880,8 @@ class ActionExecutorStage(BasePipelineStage):
                 customer_name=customer_name,
                 products=products,
                 lead_info=context.lead_info,
-                conversation_summary=conversation_summary
+                conversation_summary=conversation_summary,
+                currency=self._currency(context),
             )
             
             self.log_info(
@@ -1048,6 +1040,7 @@ class ActionExecutorStage(BasePipelineStage):
                     products=proof_products,
                     proof_presigned_url=presigned_url,
                     lead_info=context.lead_info,
+                    currency=self._currency(context),
                 )
 
             # 5. Telegram native upload — bytes go directly, no expiry problem.
@@ -1070,7 +1063,8 @@ class ActionExecutorStage(BasePipelineStage):
                         }
                         for p in products
                     ],
-                    "total_price": f"${total:.2f}",
+                    "total_price": money(total, self._currency(context)),
+                    "currency": self._currency(context),
                     "checkout_data": context.checkout_data,
                     "invoice_requested": bool(context.cart_contents.get("invoice_requested")),
                     "conversation_id": str(context.conversation_id or ""),
@@ -1194,7 +1188,8 @@ class ActionExecutorStage(BasePipelineStage):
                     }
                     for p in products
                 ],
-                "total_price": f"${total:.2f}",
+                "total_price": money(total, self._currency(context)),
+                "currency": self._currency(context),
                 "checkout_data": context.checkout_data,
                 "invoice_requested": bool(context.cart_contents.get("invoice_requested")),
                 "conversation_id": str(context.conversation_id or ""),

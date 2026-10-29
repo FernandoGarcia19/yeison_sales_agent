@@ -10,7 +10,7 @@ from app.api.v1.webhooks import router as webhook_router
 from app.api.v1.telegram_webhook import router as telegram_webhook_router
 from app.api.v1.internal_payments import router as internal_payments_router
 from app.api.v1.internal_simulator import router as internal_simulator_router
-from app.services import bank_qr
+from app.services import bank_qr, batch_manager
 
 
 @asynccontextmanager
@@ -19,6 +19,12 @@ async def lifespan(app: FastAPI):
     # Startup
     print(f"Starting {settings.app_name} v{settings.version}")
     poller = asyncio.create_task(bank_qr.run_poller()) if bank_qr.is_configured() else None
+    if settings.batch_enabled:
+        # Messages queued when the container stopped (Y-57)
+        try:
+            await batch_manager.recover_pending()
+        except Exception as e:
+            print(f"Could not recover queued batches: {e}")
     yield
     # Shutdown
     print("Shutting down...")

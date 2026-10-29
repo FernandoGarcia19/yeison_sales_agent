@@ -263,14 +263,54 @@ async def release_lock(key: str) -> bool:
     return result > 0
 
 
+# Deletes the lock only if it still holds our token (it may have expired and been taken by another worker)
+_RELEASE_IF_OWNER = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+
+async def acquire_token_lock(key: str, token: str, ttl: int) -> bool:
+    """Like acquire_lock, but the lock remembers who holds it (see release_token_lock)."""
+    redis = get_redis_client()
+    return bool(await redis.set(key, token, nx=True, ex=ttl))
+
+
+async def release_token_lock(key: str, token: str) -> bool:
+    redis = get_redis_client()
+    return bool(await redis.eval(_RELEASE_IF_OWNER, 1, key, token))
+
+
 def build_batch_queue_key(agent_phone: str, user_phone: str) -> str:
     """Build cache key for message batch queue."""
     return f"batch_queue:{agent_phone}:{user_phone}"
 
 
 def build_batch_lock_key(agent_phone: str, user_phone: str) -> str:
-    """Build cache key for batch processing lock."""
+    """The batch timer of a customer (one at a time)."""
     return f"batch_lock:{agent_phone}:{user_phone}"
+
+
+def build_batch_run_key(agent_phone: str, user_phone: str) -> str:
+    """Held while the pipeline answers a batch: the next batch of the same customer waits (Y-57)."""
+    return f"batch_run:{agent_phone}:{user_phone}"
+
+
+def build_batch_deadline_key(agent_phone: str, user_phone: str) -> str:
+    """When the batch is answered if nothing else arrives; each message moves it (Y-57)."""
+    return f"batch_deadline:{agent_phone}:{user_phone}"
+
+
+def build_batch_first_key(agent_phone: str, user_phone: str) -> str:
+    """When the first message of the batch arrived: the window never stretches past the maximum wait."""
+    return f"batch_first:{agent_phone}:{user_phone}"
+
+
+# Customers with queued messages, as JSON [agent_phone, user_phone] (phones may contain ":"):
+# what a restarted container picks up (Y-57)
+BATCH_PENDING_KEY = "batch_pending"
 
 
 def build_msg_dedup_key(message_sid: str) -> str:

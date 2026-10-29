@@ -65,15 +65,19 @@ def available_actions(state: Dict[str, Any]) -> List[str]:
 
 
 async def run_turn(tenant_id: int, agent_id: int, session_id: str, action: str,
-                   message: Optional[str] = None) -> Dict[str, Any]:
+                   message: Optional[str] = None, messages: Optional[List[str]] = None) -> Dict[str, Any]:
     if action not in ACTIONS:
         raise SimulatorError(422, f"unknown action {action}")
     key = _key(tenant_id, agent_id, session_id)
     if action == "reset":
         await cache_delete(key)
         return _view(_empty_state(), [], {"action": "reset"})
-    if action == "message" and not (message or "").strip():
+    # One message or several in a row (answered together, like a WhatsApp batch)
+    texts = [m.strip() for m in (messages if messages else [message or ""]) if m and m.strip()]
+    if action == "message" and not texts:
         raise SimulatorError(422, "message is empty")
+    if any(len(t) > 1000 for t in texts):
+        raise SimulatorError(422, "message is too long")
 
     lock = f"{key}:lock"
     if not await acquire_lock(lock, ttl=120):
@@ -82,7 +86,7 @@ async def run_turn(tenant_id: int, agent_id: int, session_id: str, action: str,
         state = await cache_get(key) or _empty_state()
         if action != "message" and action not in available_actions(state):
             raise SimulatorError(409, f"{action} is not possible now")
-        state, events, trace = await _run_in_rollback(tenant_id, agent_id, session_id, state, action, message)
+        state, events, trace = await _run_in_rollback(tenant_id, agent_id, session_id, state, action, texts)
         await cache_set(key, state, ttl=STATE_TTL)
         return _view(state, events, trace)
     finally:
@@ -90,7 +94,7 @@ async def run_turn(tenant_id: int, agent_id: int, session_id: str, action: str,
 
 
 async def _run_in_rollback(tenant_id: int, agent_id: int, session_id: str, state: Dict[str, Any],
-                           action: str, message: Optional[str]):
+                           action: str, texts: List[str]):
     phone = customer_phone(session_id)
     connection = await get_engine().connect()
     transaction = await connection.begin()
@@ -114,7 +118,7 @@ async def _run_in_rollback(tenant_id: int, agent_id: int, session_id: str, state
             conversation_id, agent_phone = conversation.id, agent.phone_number
 
         if action in ("message", "receipt"):
-            trace.update(await _customer_writes(phone, agent_phone or "sim-agent", action, message))
+            trace.update(await _customer_writes(phone, agent_phone or "sim-agent", action, texts))
         elif action == "pay":
             alias = (state["cart_contents"].get("bank_qr") or {}).get("alias")
             run.bank_charges[alias]["estado"] = "PAGADO"
@@ -140,7 +144,7 @@ async def _run_in_rollback(tenant_id: int, agent_id: int, session_id: str, state
     new_state["bank_charges"] = run.bank_charges
     events = _events(run.outbox, phone)
     if action == "message":
-        new_state["transcript"].append({"from": "customer", "text": message, "at": _now()})
+        new_state["transcript"].extend({"from": "customer", "text": text, "at": _now()} for text in texts)
     elif action == "receipt":
         new_state["transcript"].append({"from": "customer", "text": "📎 Comprobante de pago (imagen de prueba)",
                                         "at": _now()})
@@ -173,16 +177,19 @@ async def _seed(db: AsyncSession, agent: AgentInstance, phone: str, state: Dict[
     return conversation, lead
 
 
-async def _customer_writes(phone: str, agent_phone: str, action: str, message: Optional[str]) -> Dict[str, Any]:
-    from app.schemas.pipeline import PipelineContext
+async def _customer_writes(phone: str, agent_phone: str, action: str, texts: List[str]) -> Dict[str, Any]:
+    from app.services.batch_manager import build_batch_context
     from app.services.pipeline.runner import PipelineRunner
 
-    context = PipelineContext(
-        message_sid=f"sim-{uuid.uuid4().hex[:12]}", sender_phone=phone, recipient_phone=agent_phone,
-        message_body=(message or "").strip() if action == "message" else "",
-        profile_name=CUSTOMER_NAME,
-        media_urls=["simulated://receipt"] if action == "receipt" else [],
-    )
+    # Built like a WhatsApp batch, so several messages reach the pipeline exactly as in production
+    now = datetime.utcnow().timestamp()
+    if action == "receipt":
+        queued = [{"message_sid": f"sim-{uuid.uuid4().hex[:12]}", "body": "", "received_at": now,
+                   "profile_name": CUSTOMER_NAME, "media_urls": ["simulated://receipt"]}]
+    else:
+        queued = [{"message_sid": f"sim-{uuid.uuid4().hex[:12]}", "body": text, "received_at": now + i,
+                   "profile_name": CUSTOMER_NAME, "media_urls": []} for i, text in enumerate(texts)]
+    context = build_batch_context(queued, sender_phone=phone, recipient_phone=agent_phone)
     result = await PipelineRunner().run(context)
     return {"intent": result.intent, "agent_action": result.action_executed, "error": result.error,
             "ms": round(result.processing_time_ms)}

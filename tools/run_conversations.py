@@ -51,14 +51,20 @@ class Panel:
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
             raise RuntimeError(f"HTTP {e.code} en {path}: {detail}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            raise RuntimeError(f"sin conexión con {self.api_url} ({e})") from None
 
     def login(self, profile: str, email: str, password: str) -> None:
         form = urllib.parse.urlencode({"username": email, "password": password}).encode()
         data = self._request("POST", "/auth/login", form, {"content-type": "application/x-www-form-urlencoded"})
         self.tokens[profile] = data["access_token"]
 
-    def turn(self, profile: str, agent_id: int, session: str, action: str, message: Optional[str]) -> Dict[str, Any]:
-        body = json.dumps({"session_id": session, "action": action, "message": message}).encode()
+    def turn(self, profile: str, agent_id: int, session: str, action: str, message: Optional[str],
+             messages: Optional[List[str]] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"session_id": session, "action": action, "message": message}
+        if messages:
+            payload["messages"] = messages
+        body = json.dumps(payload).encode()
         headers = {"content-type": "application/json", "authorization": f"Bearer {self.tokens[profile]}"}
         return self._request("POST", f"/agents/{agent_id}/simulator", body, headers)
 
@@ -164,10 +170,11 @@ def run_case(panel: Panel, case: Case, agent_id: int) -> List[TurnResult]:
         for index, turn in enumerate(case.turns, 1):
             action = turn.get("action", "message")
             message = turn.get("say")
-            label = f"{index}. {message!r}" if message else f"{index}. [{action}]"
+            many = turn.get("say_many")
+            label = f"{index}. {message or many!r}" if (message or many) else f"{index}. [{action}]"
             started = time.monotonic()
             try:
-                view = panel.turn(case.profile, agent_id, session, action, message)
+                view = panel.turn(case.profile, agent_id, session, action, message, messages=many)
             except RuntimeError as e:
                 results.append(TurnResult(label, [str(e)], [], time.monotonic() - started))
                 break
@@ -211,7 +218,11 @@ def main() -> int:
     panel = Panel(env["api_url"])
     for profile in sorted({c.profile for c in cases}):
         account = env["agents"][profile]
-        panel.login(profile, account["email"], account["password"])
+        try:
+            panel.login(profile, account["email"], account["password"])
+        except RuntimeError as e:
+            print(f"No se pudo entrar con el perfil {profile}: {e}")
+            return 2
 
     failed, known, fixed = [], [], []
     for case in cases:

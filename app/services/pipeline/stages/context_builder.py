@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.base import BasePipelineStage
+from app.services import purchase_confirmation
 from app.services.invoice_request import checkout_requirements
 from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant, Tenant
 from app.core.database import get_session_factory
@@ -111,8 +112,11 @@ class ContextBuilderStage(BasePipelineStage):
                     combined_length=len(context.message_body)
                 )
             
-            # Load relevant inventory based on intent (with tenant-scoped caching)
-            if context.intent in ["product_inquiry", "pricing_question", "availability_check", "purchase_intent"]:
+            # Load relevant inventory based on intent (with tenant-scoped caching). A bare "sí"
+            # to the agent's offer is classified as unknown but closes a purchase (action_executor)
+            if context.intent in ["product_inquiry", "pricing_question", "availability_check", "purchase_intent"] or (
+                purchase_confirmation.confirms_offer(context.message_body, context.conversation_history)
+            ):
                 inventory_cache_key = build_inventory_cache_key(context.tenant_id)
                 cached_inventory = await cache_get(inventory_cache_key)
                 

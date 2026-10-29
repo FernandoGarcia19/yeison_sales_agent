@@ -387,7 +387,7 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
         # Add product information
         if context.relevant_products and len(context.relevant_products) > 0:
             prompt += "PRODUCTOS RELEVANTES:\n"
-            for product in context.relevant_products[:5]:
+            for product in context.relevant_products:
                 prompt += f"- {product.get('name', 'N/A')}\n"
                 prompt += f"  Precio: {money(product.get('price', 'N/A'), self._currency(context))}\n"
                 prompt += f"  Disponibilidad: {product.get('quantity', 0)} unidades\n"

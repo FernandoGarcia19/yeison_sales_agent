@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.base import BasePipelineStage
-from app.services import purchase_confirmation
+from app.services import catalog_search, purchase_confirmation
 from app.services.invoice_request import checkout_requirements
 from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant, Tenant
 from app.core.database import get_session_factory
@@ -117,20 +117,19 @@ class ContextBuilderStage(BasePipelineStage):
             if context.intent in ["product_inquiry", "pricing_question", "availability_check", "purchase_intent"] or (
                 purchase_confirmation.confirms_offer(context.message_body, context.conversation_history)
             ):
-                inventory_cache_key = build_inventory_cache_key(context.tenant_id)
-                cached_inventory = await cache_get(inventory_cache_key)
-                
-                if cached_inventory:
-                    context.relevant_products = cached_inventory[:5]  # Limit to 5
+                # The whole catalogue is cached (the old key held only 5 products)
+                inventory_cache_key = build_inventory_cache_key(context.tenant_id) + ":catalogue"
+                catalogue = await cache_get(inventory_cache_key)
+
+                if catalogue is not None:
                     self.log_info("inventory_from_cache", tenant_id=context.tenant_id)
                 else:
-                    context.relevant_products = await self._load_relevant_products(
-                        db,
-                        context.tenant_id,
-                        context.message_body
-                    )
+                    catalogue = await self._load_catalogue(db, context.tenant_id)
                     # Cache inventory for 10 minutes
-                    await cache_set(inventory_cache_key, context.relevant_products, ttl=600)
+                    await cache_set(inventory_cache_key, catalogue, ttl=600)
+                context.relevant_products = catalog_search.rank(
+                    catalogue, context.message_body, context.conversation_history
+                )
             
             # Lead info already populated by IdentificationStage — skip re-query
             if not context.lead_info:
@@ -501,25 +500,19 @@ class ContextBuilderStage(BasePipelineStage):
         # Return last N messages
         return conversation.get_conversation_history(limit)
     
-    async def _load_relevant_products(
+    async def _load_catalogue(
         self,
         db: AsyncSession,
         tenant_id: int,
-        message_body: str
     ) -> list[dict]:
-        """
-        Load products relevant to the user's query.
-        
-        In production, use semantic search or vector embeddings.
-        For now, just return active products.
-        """
-        
+        """The business's active products in stock; catalog_search picks the ones of each turn."""
+
         from sqlalchemy import or_
         stmt = select(InventoryTenant).where(
             InventoryTenant.tenant_id == tenant_id,
             InventoryTenant.active == True,
             or_(InventoryTenant.quantity > 0, InventoryTenant.quantity.is_(None))
-        ).limit(5)
+        ).order_by(InventoryTenant.id).limit(catalog_search.MAX_CATALOGUE)
         
         result = await db.execute(stmt)
         products = result.scalars().all()

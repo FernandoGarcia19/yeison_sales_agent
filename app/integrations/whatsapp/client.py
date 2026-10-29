@@ -13,6 +13,7 @@ from typing import Optional
 import structlog
 from twilio.rest import Client
 
+from app.core import simulation
 from app.core.config import settings
 from app.integrations.whatsapp.evolution import send_evolution_message
 from app.services.whatsapp_connections import get_whatsapp_connection_for_phone
@@ -98,6 +99,8 @@ async def send_whatsapp_message(
     Returns:
         Provider message identifier.
     """
+    if simulation.current():
+        return simulation.capture("whatsapp", to=to, body=body, media_url=media_url)
     try:
         connection = await get_whatsapp_connection_for_phone(from_number)
         provider = (connection or {}).get("provider") or settings.whatsapp_provider_default or "evolution"

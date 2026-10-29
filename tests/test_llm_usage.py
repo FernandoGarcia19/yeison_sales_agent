@@ -45,5 +45,5 @@ async def test_a_failing_write_does_not_raise(monkeypatch):
     def broken_factory():
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(llm_usage, "get_session_factory", broken_factory)
+    monkeypatch.setattr(llm_usage, "get_base_session_factory", broken_factory)
     await llm_usage._write({"tenant_id": 1, "feature": "x"})  # only logs

@@ -161,3 +161,20 @@ async def test_context_builder_reads_the_currency():
 ])
 def test_whatsapp_format(text, expected):
     assert to_whatsapp(text) == expected
+
+
+async def test_a_confirmation_without_a_product_does_not_open_the_checkout(monkeypatch):
+    from app.services.pipeline.stages.action_executor import ActionExecutorStage
+
+    stage = ActionExecutorStage()
+
+    async def nothing_found(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(stage, "_extract_purchase_items", nothing_found)
+    context = _context("Sí")
+    context.relevant_products = [{"id": 1, "name": "Polera", "price": "50"}, {"id": 2, "name": "Galletas", "price": "8"}]
+    await stage._handle_purchase_intent(context)
+    assert context.action_result["action"] == "qualify_lead" and context.action_result["missing"] == "product"
+    assert context.current_state == ConversationState.BROWSING and not context.cart_contents.get("items")
+

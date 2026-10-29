@@ -218,6 +218,17 @@ class ActionExecutorStage(BasePipelineStage):
             if selected:
                 context.cart_contents["items"] = selected
 
+        if not context.cart_contents.get("items"):
+            # Nothing identifiable to sell: ask for the product instead of collecting data
+            # (and notifying the supervisor) for an empty order
+            context.action_result = {
+                "lead_id": context.lead_info.get("id") if context.lead_info else None,
+                "action": "qualify_lead",
+                "stage": "considering",
+                "missing": "product",
+            }
+            return
+
         # Gate: all checkout data must be collected before payment
         required_fields = self._get_checkout_requirements(context)
         missing_fields = [f for f in required_fields if not context.checkout_data.get(f)]

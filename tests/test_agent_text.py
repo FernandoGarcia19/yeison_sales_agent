@@ -22,7 +22,7 @@ OFFER = [
 @pytest.mark.parametrize("message", [
     "Sí, confírmalo", "confirmo", "CONFIRMADO!", "Eso nomás, quiero pagar", "Quiero 2 paquetes",
     "me llevo dos", "Lo quiero", "las llevo", "hagamos el pedido", "dame 3 por favor", "procede",
-    "quiero hacer el pedido", "envíamelo",
+    "quiero hacer el pedido", "envíamelo", "¿me harías un pedido de 3?", "quisiera 2",
 ])
 def test_closing_phrases(message):
     assert pc.closes_purchase(message)
@@ -47,9 +47,12 @@ def test_not_a_yes(message):
 
 def test_yes_counts_only_after_an_offer():
     assert pc.confirms_offer("Sí", OFFER)
-    # The agent did not ask anything
-    statement = [{**OFFER[1], "content": "Tenemos galletas de quinua a Bs 8.00."}]
+    # The order offer counts even without a question mark
+    assert pc.confirms_offer("Sí", [{**OFFER[1], "content": "Te lo dejo listo para confirmar el pedido ✨"}])
+    # A price answer that did not ask anything
+    statement = [{**OFFER[1], "action_type": "pricing_inquiry", "content": "Tenemos galletas de quinua a Bs 8.00."}]
     assert not pc.confirms_offer("Sí", statement)
+    assert pc.confirms_offer("Sí", [{**statement[0], "content": "Están a Bs 8.00. ¿Te preparo un paquete?"}])
     # A question that was not about the order (payment or checkout steps answer their own way)
     other = [{**OFFER[1], "action_type": "collect_checkout_data"}]
     assert not pc.confirms_offer("Sí", other)

@@ -358,6 +358,7 @@ IMPORTANTE:
 - El nombre de tu empresa es {company_name}
 - Tu nombre es {agent_name}
 - NO inventes información que no te proporcionen
+- NUNCA digas que un pedido está confirmado, registrado o listo si el RESULTADO DE ACCIÓN no lo dice: solo el sistema confirma pedidos
 - Si no hay productos disponibles o información específica sobre UN PRODUCTO, sé honesto
 - Pero SIEMPRE conoces la información básica de {company_name} que está arriba
 - Siempre busca ayudar al cliente de la mejor manera posible"""

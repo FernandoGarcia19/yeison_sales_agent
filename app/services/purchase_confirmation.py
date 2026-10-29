@@ -21,8 +21,9 @@ _CLOSING = re.compile(
     r"|\b(quiero|voy a|vamos a) (pagar|hacer el pago|realizar el pago|hacer (el|un|mi) pedido)\b"
     r"|\bpagar ahora\b|\b(realizar|hacer) el pago\b|\bproced\w*"
     r"|\b(hagamos|haz|hazme|haga|hagame) (el|un|mi) pedido\b"
+    r"|\bpedido de " + _QUANTITY + r"\b"
     r"|\b(enviamelo|enviamela|enviamelos|enviamelas|mandamelo|mandamela|mandamelos|mandamelas)\b"
-    r"|\b(quiero|dame|deme|mandame|ponme|anotame|separame|reservame)( me)? " + _QUANTITY + r"\b"
+    r"|\b(quiero|quisiera|dame|deme|mandame|ponme|anotame|separame|reservame)( me)? " + _QUANTITY + r"\b"
 )
 
 # A short reply that says yes. Only closes the purchase when the agent had just offered it.
@@ -30,8 +31,10 @@ _YES = {"si", "sip", "dale", "ok", "okay", "okey", "oki", "listo", "claro", "per
         "bueno", "correcto", "exacto", "acuerdo", "eso", "afirmativo", "obvio"}
 _FILLER = {"de", "es", "asi", "por", "favor", "porfa", "gracias", "nomas", "todo", "ya", "entonces",
            "muy", "bien", "y", "que", "lo", "esta", "seria", "senor", "senora", "hermano", "amigo", "amiga"}
-# Answers of the agent after which a "yes" means "go ahead with the order"
-_OFFER_ACTIONS = {"purchase_intent", "pricing_inquiry", "product_inquiry", "availability_check"}
+# The agent proposed the order and waits for the customer's confirmation (qualify_lead)
+_ORDER_OFFER = "purchase_intent"
+# Answers after which a "yes" means "go ahead" only if the agent asked something
+_QUESTION_ACTIONS = {"pricing_inquiry", "product_inquiry", "availability_check"}
 
 
 def normalize(text: Optional[str]) -> str:
@@ -54,11 +57,15 @@ def is_affirmative(message: Optional[str]) -> bool:
 
 
 def purchase_was_offered(history: Optional[List[Dict[str, Any]]]) -> bool:
-    """The agent's last message asked the customer whether to go ahead."""
+    """The agent's last message offered the order or asked whether to go ahead."""
     last = next((m for m in reversed(history or []) if m.get("role") == "assistant"), None)
     if not last:
         return False
-    return last.get("action_type") in _OFFER_ACTIONS and "?" in (last.get("content") or "")
+    action = last.get("action_type")
+    # The model does not always end the offer with a question mark ("te lo dejo listo para confirmar")
+    if action == _ORDER_OFFER:
+        return True
+    return action in _QUESTION_ACTIONS and "?" in (last.get("content") or "")
 
 
 def confirms_offer(message: Optional[str], history: Optional[List[Dict[str, Any]]]) -> bool:

@@ -19,7 +19,7 @@ class SimulatorTurn(BaseModel):
     tenant_id: int
     agent_id: int
     session_id: str = Field(..., pattern=r"^[a-f0-9]{8,32}$")
-    action: Literal["message", "receipt", "pay", "approve", "reject", "reset"] = "message"
+    action: Literal["message", "receipt", "pay", "approve", "reject", "resume", "reset"] = "message"
     message: Optional[str] = Field(None, max_length=1000)
     # Several messages in a row, answered as one batch like on WhatsApp (Y-57)
     messages: Optional[List[str]] = Field(None, max_length=5)

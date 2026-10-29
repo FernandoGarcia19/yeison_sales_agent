@@ -52,7 +52,7 @@ def test_every_case_file_is_valid(path):
     case = runner.Case.load(path, defaults)
     assert case.name and case.profile in {"demo", "moda"} and case.turns
     for turn in case.turns:
-        assert turn.get("say") or turn.get("action") in {"receipt", "pay", "approve", "reject"}
+        assert turn.get("say") or turn.get("say_many") or turn.get("action") in {"receipt", "pay", "approve", "reject"}
         unknown = set(turn.get("expect") or {}) - {
             "state", "cart", "cart_has", "cart_max", "cart_without", "collected", "actions", "payment",
             "supervisor", "says", "says_any", "not_says", "not_matches", "reply"}

@@ -4,7 +4,7 @@ Reached only inside the docker network (nginx returns 404 for /agent/api/v1/inte
 """
 
 import hmac
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -21,6 +21,8 @@ class SimulatorTurn(BaseModel):
     session_id: str = Field(..., pattern=r"^[a-f0-9]{8,32}$")
     action: Literal["message", "receipt", "pay", "approve", "reject", "reset"] = "message"
     message: Optional[str] = Field(None, max_length=1000)
+    # Several messages in a row, answered as one batch like on WhatsApp (Y-57)
+    messages: Optional[List[str]] = Field(None, max_length=5)
 
 
 @router.post("/turn")
@@ -31,6 +33,7 @@ async def simulator_turn(turn: SimulatorTurn, x_internal_key: str = Header(defau
     if not hmac.compare_digest(x_internal_key.encode(), settings.backend_api_key.encode()):
         raise HTTPException(status_code=401, detail="invalid key")
     try:
-        return await simulator.run_turn(turn.tenant_id, turn.agent_id, turn.session_id, turn.action, turn.message)
+        return await simulator.run_turn(turn.tenant_id, turn.agent_id, turn.session_id, turn.action, turn.message,
+                                        messages=turn.messages)
     except simulator.SimulatorError as e:
         raise HTTPException(status_code=e.status, detail=e.message)

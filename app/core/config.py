@@ -36,8 +36,10 @@ class Settings(BaseSettings):
     
     # Message batching settings
     batch_enabled: bool = True  # Enable/disable message batching
-    batch_window_seconds: int = 3  # Wait time to collect multiple messages
+    batch_window_seconds: float = 3  # Silence after the last message before answering
+    batch_max_wait_seconds: float = 10  # Longest wait from the first message of a batch
     batch_max_messages: int = 5  # Maximum messages per batch (fire early if reached)
+    batch_run_timeout_seconds: int = 180  # How long a batch waits for the previous one of the same customer
     
     # AI/LLM settings
     openai_api_key: Optional[str] = None

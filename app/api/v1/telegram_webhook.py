@@ -322,19 +322,22 @@ async def _replace_text_message(chat_id: str, message_id: int, text: str) -> boo
         return False
 
 
-async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> None:
-    """Ask panel_backend to record the SALE_EXIT movements of a sale. Failures are logged, never raised."""
+async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> bool:
+    """
+    Ask panel_backend to record the SALE_EXIT movements of a sale. Failures are logged, never raised.
+    Returns whether it is done (the panel is idempotent per sale, so a retry never discounts twice).
+    """
     if simulation.current():
         simulation.capture("inventory", items=[{"name": i.get("name"), "quantity": i.get("quantity")}
                                                for i in sale_items or []])
-        return
+        return True
     if not settings.backend_api_url or not settings.backend_api_key:
         logger.error("stock_exit_missing_backend_config", sale_id=sale_id)
-        return
+        return False
     items = [{"product_id": i.get("product_id"), "quantity": i.get("quantity")}
              for i in sale_items or [] if i.get("product_id")]
     if not items:
-        return
+        return True
     url = f"{settings.backend_api_url.rstrip('/')}/internal/inventory/sale-exit"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -342,10 +345,12 @@ async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> Non
                                          headers={"x-internal-key": settings.backend_api_key})
         if response.status_code != 200:
             logger.error("stock_exit_failed", sale_id=sale_id, status=response.status_code, body=response.text[:200])
-        else:
-            logger.info("stock_exit_recorded", sale_id=sale_id, movements=len(response.json().get("movements", [])))
+            return False
+        logger.info("stock_exit_recorded", sale_id=sale_id, movements=len(response.json().get("movements", [])))
+        return True
     except Exception as e:
         logger.error("stock_exit_request_failed", sale_id=sale_id, error=str(e))
+        return False
 
 
 async def _send_telegram_message(chat_id: str, text: str, reply_markup: Optional[dict] = None) -> None:

@@ -13,6 +13,7 @@ from app.models.conversation import SalesConversation
 from app.models.configuration_tenant import ConfigurationTenant
 from app.models.whatsapp_connection import WhatsAppConnection
 from app.models.sale import Sale
+from app.models.bank_qr_charge import BankQrCharge
 
 __all__ = [
     "Tenant",
@@ -23,4 +24,5 @@ __all__ = [
     "ConfigurationTenant",
     "WhatsAppConnection",
     "Sale",
+    "BankQrCharge",
 ]

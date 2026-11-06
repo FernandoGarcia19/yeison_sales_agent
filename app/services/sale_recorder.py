@@ -51,6 +51,8 @@ async def record_sale(
     agent: AgentInstance,
     payment_method: str,
     payment_reference: Optional[str] = None,
+    lead: Optional[Lead] = None,
+    cart: Optional[Dict[str, Any]] = None,
 ) -> Optional[Sale]:
     """
     Create the sale for the conversation's current purchase cycle, once.
@@ -59,9 +61,13 @@ async def record_sale(
     existing sale if this cycle was already recorded, or None if there is no
     lead or no items to record.
     """
-    lead = (await db.execute(
-        select(Lead).where(Lead.conversation_id == conversation.id).order_by(Lead.id.desc()).limit(1)
-    )).scalar_one_or_none()
+    # A bank QR paid after the cart changed (or after the purchase was dropped) records the cart and
+    # the lead of the moment the QR was sent: that is what the customer paid for.
+    if lead is None:
+        lead = (await db.execute(
+            select(Lead).where(Lead.conversation_id == conversation.id).order_by(Lead.id.desc()).limit(1)
+        )).scalar_one_or_none()
+    cart_contents = cart if cart is not None else (conversation.cart_contents or {})
     if not lead:
         logger.error("sale_not_recorded_no_lead", conversation_id=conversation.id)
         return None
@@ -73,7 +79,7 @@ async def record_sale(
     if existing:
         return existing
 
-    items = build_sale_items((conversation.cart_contents or {}).get("items") or [])
+    items = build_sale_items(cart_contents.get("items") or [])
     if not items:
         logger.error("sale_not_recorded_empty_cart", conversation_id=conversation.id, lead_id=lead.id)
         return None
@@ -100,7 +106,7 @@ async def record_sale(
         payment_status="paid" if payment_method == "qr" else "pending",
         sale_items=items,
         currency=base_currency,
-        invoice_request=build_invoice_request(conversation.cart_contents),
+        invoice_request=build_invoice_request(cart_contents),
         payment_reference=payment_reference,
     )
     db.add(sale)

@@ -111,6 +111,10 @@ class ActionExecutorStage(BasePipelineStage):
             charge = bank_qr.pending_charge(context.cart_contents)
             if charge and await self._bank_qr_paid(context, charge):
                 return context
+            if (charge and context.action_type != "payment_proof_received" and bank_qr.is_expired(charge)
+                    and await self._handle_bank_qr_flow(context, renewed=True)):
+                # The QR expired unpaid: a new one for the same total (the old one is still checked)
+                return context
             if charge and context.action_type != "payment_proof_received":
                 context.action_type = "awaiting_bank_payment"
                 context.action_result = {
@@ -541,11 +545,11 @@ class ActionExecutorStage(BasePipelineStage):
                 "error": str(e)
             }
     
-    async def _handle_bank_qr_flow(self, context: PipelineContext) -> bool:
+    async def _handle_bank_qr_flow(self, context: PipelineContext, renewed: bool = False) -> bool:
         """
         Charge with a single-use bank QR for the exact cart total (SIP, see app/services/bank_qr.py).
         Returns False when it cannot (no total, unsupported currency, service down), so the
-        caller falls back to the static QR image.
+        caller falls back to the static QR image. `renewed`: the previous QR expired unpaid.
         """
         items = context.cart_contents.get("items") or []
         total = bank_qr.cart_total(items)
@@ -581,6 +585,8 @@ class ActionExecutorStage(BasePipelineStage):
 
         amount = bank_qr.amount_label(total, currency)
         greeting = f"¡Hola {context.profile_name}! " if context.profile_name else ""
+        if renewed:
+            greeting = f"{greeting}Tu QR anterior venció, así que te envío uno nuevo. "
         body = (
             f"{greeting}Tu total es de *{amount}*. 🧾\n\n"
             f"Escanea este QR con la app de cualquier banco. Es solo para este pedido y vence el "
@@ -608,9 +614,21 @@ class ActionExecutorStage(BasePipelineStage):
             "status": "pending",
             "created_at": datetime.utcnow().isoformat(),
         }
+        try:
+            # The QR's own row: checked by the poller whatever happens to the conversation
+            await bank_qr.register_charge(
+                alias=charge["alias"], tenant_id=context.tenant_id, agent_instance_id=context.agent_instance_id,
+                conversation_id=context.conversation_id, lead_id=context.lead_id, amount=total,
+                currency=currency, cart_contents=context.cart_contents, expires=charge.get("fechaVencimiento"),
+                replaces=(previous or {}).get("alias"),
+            )
+        except Exception as e:
+            # The cart still has it: the poller adopts it from the conversation
+            self.log_error("bank_qr_register_failed", alias=charge["alias"], error=str(e))
         context.current_state = ConversationState.AWAITING_RECEIPT
         context.action_type = "awaiting_bank_payment"
-        context.action_result = {"action": "awaiting_bank_payment", "qr_sent": True, "amount": amount}
+        context.action_result = {"action": "awaiting_bank_payment", "qr_sent": True, "amount": amount,
+                                 "renewed": renewed}
         context.response_already_sent = True
         context.response_text = f"📲 [QR del banco por {amount} enviado al cliente]"
         self.log_info("bank_qr_sent", alias=charge["alias"], amount=str(total), currency=currency)
@@ -619,7 +637,7 @@ class ActionExecutorStage(BasePipelineStage):
     async def _bank_qr_paid(self, context: PipelineContext, charge: dict) -> bool:
         """Ask the bank whether the pending QR was paid; if so the sale is recorded and the customer told."""
         outcome = await bank_qr.check_and_confirm(charge["alias"], source="customer_message")
-        if outcome not in ("recorded", "already_recorded"):
+        if outcome not in ("recorded", "already_recorded", "duplicate"):
             return False
         context.cart_contents["bank_qr"] = {**charge, "status": "paid"}
         context.current_state = ConversationState.ORDER_COMPLETED

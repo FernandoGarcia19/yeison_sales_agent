@@ -141,77 +141,12 @@ class ContextBuilderStage(BasePipelineStage):
                     context.sender_phone
                 )
         
-        # Add specific instructions based on ConversationState
-        state_instructions = ""
-        current_state = context.current_state
-        if current_state == ConversationState.BROWSING:
-            state_instructions = "The user is currently browsing. Answer their questions about our products."
-        elif current_state == ConversationState.CART_BUILDING:
-            state_instructions = (
-                "El cliente está armando su pedido (el carrito está en CARRITO ACTUAL). "
-                "Pregúntale si quiere algo más o si confirma el pedido."
-            )
-        elif current_state == ConversationState.FULFILLMENT_COORD:
-            invoice_asked = bool(context.cart_contents.get("invoice_requested"))
-            missing = [
-                f for f in delivery.requirements(context.agent_config, context.cart_contents)
-                if not context.checkout_data.get(f)
-            ]
-            collected_str = ", ".join(f"{k}: {v}" for k, v in context.checkout_data.items()) if context.checkout_data else "ninguno aún"
-            missing_str = ", ".join(missing) if missing else "todos recopilados"
-            state_instructions = (
-                f"El usuario está listo para finalizar su compra. "
-                f"Datos ya recopilados: {collected_str}. "
-                f"Datos que aún faltan: {missing_str}. "
-                f"Pide amablemente la información faltante. NO envíes el QR ni menciones el pago "
-                f"hasta que el usuario haya proporcionado todos los datos requeridos."
-            )
-            if invoice_asked:
-                state_instructions += (
-                    " El cliente pidió factura: el NIT o CI y la razón social (los datos «para la factura») sirven para "
-                    "que el negocio la emita. No digas que ya fue emitida ni inventes su número."
-                )
-        elif current_state == ConversationState.AWAITING_PAYMENT_METHOD:
-            state_instructions = (
-                "El usuario ya confirmó su compra y proporcionó todos los datos necesarios. "
-                "Ahora debe elegir su método de pago. Tenemos disponibles: pago con QR (billetera digital) "
-                "y pago físico/efectivo. Pregunta amablemente cuál prefiere. "
-                "No cambies de tema hasta recibir su respuesta."
-            )
-        elif current_state == ConversationState.AWAITING_RECEIPT:
-            payment_method = context.cart_contents.get("payment_method", "qr")
-            proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
-            bank_charge = (context.cart_contents.get("bank_qr") or {})
-            if bank_charge.get("status") == "pending":
-                state_instructions = (
-                    "Le enviamos al usuario un QR del banco por el total exacto de su pedido. El pago se confirma "
-                    "solo: en cuanto el banco nos avise, le confirmamos por este chat. NO pidas comprobante. "
-                    "Si dice que ya pagó, dile que estamos esperando la confirmación del banco, que suele llegar "
-                    "en segundos. Si quiere cambiar el pedido, dile que lo puede hacer y que le enviaremos un QR nuevo."
-                )
-            elif payment_method == "physical":
-                state_instructions = (
-                    "El usuario eligió pago físico/efectivo. Su pedido fue enviado al supervisor para aprobación. "
-                    "Informa amablemente que su pedido está siendo revisado y que el equipo se pondrá en contacto "
-                    "para coordinar el pago. NO pidas ningún comprobante."
-                )
-            elif proof_submitted:
-                state_instructions = (
-                    "El usuario ya envió su comprobante de pago QR y está esperando la aprobación del supervisor. "
-                    "Informa amablemente que estamos revisando su pago y que recibirán una confirmación pronto. "
-                    "NO pidas el comprobante de nuevo."
-                )
-            else:
-                state_instructions = (
-                    "Estamos esperando que el usuario envíe una foto o captura de su comprobante de pago QR. "
-                    "No respondas preguntas no relacionadas. Recuérdales amablemente que deben enviar la imagen del comprobante."
-                )
-            
-        if state_instructions:
-            if not context.agent_config.get("operations_info"):
-                context.agent_config["operations_info"] = {}
-            existing_process = context.agent_config["operations_info"].get("sales_process", "")
-            context.agent_config["operations_info"]["sales_process"] = f"{existing_process}\n\nINSTRUCCIONES DE ESTADO ACTUAL:\n{state_instructions}".strip()
+        # State-based instructions for the system prompt used to be built here, from
+        # context.current_state/checkout_data as loaded at the *start* of the turn - but
+        # action_executor (which runs after this stage) is what actually extracts new checkout
+        # data and may move the state on, so that text could describe a state the turn had
+        # already moved past (e.g. still asking for a field action_executor just collected).
+        # response_generator now builds it from the post-action context instead (_state_instructions).
 
         self.log_info(
             "context_built",

@@ -6,7 +6,7 @@ import json
 from typing import Optional
 from openai import AsyncOpenAI
 
-from app.schemas.pipeline import PipelineContext, IntentType
+from app.schemas.pipeline import ConversationState, PipelineContext, IntentType
 from app.services.pipeline.base import BasePipelineStage
 from app.integrations.whatsapp.client import send_whatsapp_message
 from app.integrations.whatsapp.formatting import to_whatsapp
@@ -392,7 +392,88 @@ REGLAS QUE NO SE ROMPEN:
 - NO inventes información que no te dieron, pero SIEMPRE conoces los datos básicos de {company_name} que están arriba.
 - El nombre de tu empresa es {company_name} y tu nombre es {agent_name}."""
 
+        state_instructions = self._state_instructions(context)
+        if state_instructions:
+            system_prompt += f"\n\nINSTRUCCIONES DE ESTADO ACTUAL:\n{state_instructions}"
+
         return system_prompt
+
+    def _state_instructions(self, context: PipelineContext) -> str:
+        """
+        Extra guidance based on where the conversation stands right now. Built here (after
+        action_executor ran) rather than in context_builder, which runs before it: computing
+        this from the pre-action state meant it could describe a state the turn had already
+        moved past (e.g. still asking for a checkout field action_executor just collected).
+        """
+        current_state = context.current_state
+        if current_state == ConversationState.BROWSING:
+            return "El cliente está mirando: responde sus preguntas sobre los productos."
+
+        if current_state == ConversationState.CART_BUILDING:
+            return (
+                "El cliente está armando su pedido (el carrito está en CARRITO ACTUAL). "
+                "Pregúntale si quiere algo más o si confirma el pedido."
+            )
+
+        if current_state == ConversationState.FULFILLMENT_COORD:
+            invoice_asked = bool(context.cart_contents.get("invoice_requested"))
+            missing = [
+                f for f in delivery.requirements(context.agent_config, context.cart_contents)
+                if not context.checkout_data.get(f)
+            ]
+            collected_str = ", ".join(f"{k}: {v}" for k, v in context.checkout_data.items()) if context.checkout_data else "ninguno aún"
+            missing_str = ", ".join(missing) if missing else "todos recopilados"
+            instructions = (
+                f"El usuario está listo para finalizar su compra. "
+                f"Datos ya recopilados: {collected_str}. "
+                f"Datos que aún faltan: {missing_str}. "
+                f"Pide amablemente la información faltante. NO envíes el QR ni menciones el pago "
+                f"hasta que el usuario haya proporcionado todos los datos requeridos."
+            )
+            if invoice_asked:
+                instructions += (
+                    " El cliente pidió factura: el NIT o CI y la razón social (los datos «para la factura») sirven para "
+                    "que el negocio la emita. No digas que ya fue emitida ni inventes su número."
+                )
+            return instructions
+
+        if current_state == ConversationState.AWAITING_PAYMENT_METHOD:
+            return (
+                "El usuario ya confirmó su compra y proporcionó todos los datos necesarios. "
+                "Ahora debe elegir su método de pago. Tenemos disponibles: pago con QR (billetera digital) "
+                "y pago físico/efectivo. Pregunta amablemente cuál prefiere. "
+                "No cambies de tema hasta recibir su respuesta."
+            )
+
+        if current_state == ConversationState.AWAITING_RECEIPT:
+            payment_method = context.cart_contents.get("payment_method", "qr")
+            proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
+            bank_charge = context.cart_contents.get("bank_qr") or {}
+            if bank_charge.get("status") == "pending":
+                return (
+                    "Le enviamos al usuario un QR del banco por el total exacto de su pedido. El pago se confirma "
+                    "solo: en cuanto el banco nos avise, le confirmamos por este chat. NO pidas comprobante. "
+                    "Si dice que ya pagó, dile que estamos esperando la confirmación del banco, que suele llegar "
+                    "en segundos. Si quiere cambiar el pedido, dile que lo puede hacer y que le enviaremos un QR nuevo."
+                )
+            if payment_method == "physical":
+                return (
+                    "El usuario eligió pago físico/efectivo. Su pedido fue enviado al supervisor para aprobación. "
+                    "Informa amablemente que su pedido está siendo revisado y que el equipo se pondrá en contacto "
+                    "para coordinar el pago. NO pidas ningún comprobante."
+                )
+            if proof_submitted:
+                return (
+                    "El usuario ya envió su comprobante de pago QR y está esperando la aprobación del supervisor. "
+                    "Informa amablemente que estamos revisando su pago y que recibirán una confirmación pronto. "
+                    "NO pidas el comprobante de nuevo."
+                )
+            return (
+                "Estamos esperando que el usuario envíe una foto o captura de su comprobante de pago QR. "
+                "No respondas preguntas no relacionadas. Recuérdales amablemente que deben enviar la imagen del comprobante."
+            )
+
+        return ""
     
     def _build_user_prompt(self, context: PipelineContext) -> str:
         """Build user prompt with conversation context."""

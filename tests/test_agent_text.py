@@ -125,6 +125,43 @@ def test_prompt_prices_in_bolivianos():
     assert "*un asterisco*" in system
 
 
+def test_formality_never_leaks_as_the_raw_none_token():
+    # Most tenants never set personality.formality_level (onboarding leaves it unset);
+    # the prompt used to literally say "Formalidad: None" to the model.
+    context = _context("hola")
+    system = ResponseGeneratorStage()._build_system_prompt(context)
+    assert "Formalidad: None" not in system
+    assert "CÓMO HABLAS" in system
+
+
+def test_recent_openers_are_flagged_so_the_agent_does_not_repeat_itself():
+    stage = ResponseGeneratorStage()
+    history = [
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": "¡Hola! Soy tu asistente de ventas, ¿en qué te ayudo?"},
+        {"role": "user", "content": "¿tienen galletas?"},
+        {"role": "assistant", "content": "¡Perfecto! Sí tenemos galletas de quinua disponibles ahora."},
+    ]
+    openers = stage._recent_openers(history)
+    assert openers == [
+        "¡Perfecto! Sí tenemos galletas de quinua",
+        "¡Hola! Soy tu asistente de ventas,",
+    ]
+
+    context = _context("¿a cuánto están?", history=history)
+    prompt = stage._build_user_prompt(context)
+    assert "NO repitas estas aperturas que ya usaste" in prompt
+    assert "¡Perfecto! Sí tenemos galletas de quinua" in prompt
+
+
+def test_no_openers_warning_without_prior_agent_turns():
+    stage = ResponseGeneratorStage()
+    assert stage._recent_openers([]) == []
+    assert stage._recent_openers([{"role": "user", "content": "hola"}]) == []
+    prompt = stage._build_user_prompt(_context("hola", history=[]))
+    assert "NO repitas estas aperturas" not in prompt
+
+
 def test_the_order_is_shown_before_asking_the_data():
     context = _context("Quiero 2 galletas")
     context.cart_contents = {"items": [{"id": 1, "name": "Galletas de quinua", "price": "8.00", "quantity": 2}]}
@@ -159,6 +196,23 @@ async def test_context_builder_reads_the_currency():
 
     config = await ContextBuilderStage()._load_agent_configuration(Db(), 21)
     assert config["tenant_info"]["currency"] == "BOB"
+
+
+def test_deep_merge_does_not_let_an_unset_field_clobber_the_default():
+    # personality.formality_level defaults to None in the DB schema when onboarding never
+    # touched it - that used to overwrite the "casual" default with None.
+    base = {"personality": {"formality_level": "casual", "tone": "friendly"}}
+    override = {"personality": {"formality_level": None, "tone": "formal"}}
+    ContextBuilderStage()._deep_merge(base, override)
+    assert base["personality"]["formality_level"] == "casual"
+    assert base["personality"]["tone"] == "formal"  # a real override still wins
+
+
+def test_deep_merge_still_sets_none_for_keys_with_no_prior_default():
+    base = {"integrations": {}}
+    override = {"integrations": {"whatsapp_number": None}}
+    ContextBuilderStage()._deep_merge(base, override)
+    assert base["integrations"]["whatsapp_number"] is None
 
 
 @pytest.mark.parametrize("text, expected", [

@@ -162,6 +162,28 @@ def test_no_openers_warning_without_prior_agent_turns():
     assert "NO repitas estas aperturas" not in prompt
 
 
+def test_state_instructions_reflect_the_action_this_turn_took_not_the_one_before_it():
+    # Bug repro: checkout data completes and action_executor moves the state on to
+    # AWAITING_PAYMENT_METHOD in this same turn. The system prompt must describe *that*,
+    # not "still waiting for Nombre completo" (which context_builder used to compute from the
+    # state as it was *before* action_executor ran, i.e. one turn stale).
+    context = _context("Juan Perez", state=ConversationState.AWAITING_PAYMENT_METHOD)
+    context.checkout_data = {"Nombre completo": "Juan Perez", "Entrega (retiro en tienda o envío)": "Retiro en tienda"}
+    context.cart_contents = {"items": [{"id": 1, "name": "Chompa de lana", "price": "220.00", "quantity": 1}]}
+    system = ResponseGeneratorStage()._build_system_prompt(context)
+    assert "elegir su método de pago" in system
+    assert "Datos que aún faltan" not in system
+
+
+def test_state_instructions_still_list_missing_fields_mid_checkout():
+    context = _context("hola", state=ConversationState.FULFILLMENT_COORD)
+    context.checkout_data = {"Nombre completo": "Juan Perez"}
+    context.cart_contents = {"items": [{"id": 1, "name": "Chompa de lana", "price": "220.00", "quantity": 1}]}
+    system = ResponseGeneratorStage()._build_system_prompt(context)
+    assert "Datos que aún faltan" in system
+    assert "Entrega" in system
+
+
 def test_the_order_is_shown_before_asking_the_data():
     context = _context("Quiero 2 galletas")
     context.cart_contents = {"items": [{"id": 1, "name": "Galletas de quinua", "price": "8.00", "quantity": 2}]}

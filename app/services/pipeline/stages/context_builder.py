@@ -487,6 +487,11 @@ class ContextBuilderStage(BasePipelineStage):
         for key, value in override.items():
             if key in base and isinstance(base[key], dict) and isinstance(value, dict):
                 self._deep_merge(base[key], value)
+            elif value is None and base.get(key) is not None:
+                # Optional fields (e.g. personality.formality_level) default to None in the
+                # DB/schema meaning "not set", not "explicitly cleared" - don't let that null
+                # clobber a real default (it was literally landing in the LLM prompt as "None").
+                continue
             else:
                 base[key] = value
     

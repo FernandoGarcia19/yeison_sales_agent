@@ -122,6 +122,22 @@ class ResponseGeneratorStage(BasePipelineStage):
         return to_whatsapp(response)
 
     @staticmethod
+    def _recent_openers(history: Optional[list], max_turns: int = 3, words: int = 6) -> list[str]:
+        """First few words of the agent's own last replies, to steer away from repeating them."""
+        if not history:
+            return []
+        openers = []
+        for msg in reversed(history):
+            if msg.get("role") != "assistant":
+                continue
+            content = (msg.get("content") or "").strip()
+            if content:
+                openers.append(" ".join(content.split()[:words]))
+            if len(openers) >= max_turns:
+                break
+        return openers
+
+    @staticmethod
     def _currency(context: PipelineContext) -> str:
         """The business's currency, loaded with the agent configuration (context_builder)."""
         return ((context.agent_config or {}).get("tenant_info") or {}).get("currency") or "BOB"
@@ -230,6 +246,12 @@ class ResponseGeneratorStage(BasePipelineStage):
             "casual": "casual y relajado",
             "formal": "formal y respetuoso"
         }.get(tone, "amigable")
+
+        # Build formality guidance (never interpolate the raw token - it can be None)
+        formality_guide = {
+            "casual": "tuteo, cercano, como le hablarías a un conocido",
+            "formal": "de usted, respetuoso, sin perder calidez"
+        }.get(formality, "natural y cercano, ni acartonado ni demasiado informal")
         
         # Get additional business context from new config structure
         product_info = agent_config.get("product_info", {})
@@ -332,12 +354,25 @@ FRASES PERSONALIZADAS:
         system_prompt += f"""
 PERSONALIDAD Y ESTILO:
 - Tono: {tone_guide}
-- Formalidad: {formality}
+- Formalidad: {formality_guide}
 - Emojis: {emoji_guide}
 - Longitud de respuesta: {length_guide}
 - SIEMPRE responde en ESPAÑOL
 - {price_rule}
 - Escribes por WhatsApp: para resaltar usa *un asterisco* (nunca **dos**); sin títulos con #, sin tablas
+
+CÓMO HABLAS (esto importa más que las reglas de abajo):
+- Escribes como una persona real texteando por WhatsApp, no como un documento ni como un bot leyendo un guion.
+- Varía cómo arrancas cada mensaje: no empieces todo con "¡Perfecto!", "¡Excelente!" o "¡Claro!" solo porque sonó bien una vez.
+- No repitas ni resumas lo que te dieron como si fuera un reporte (nada de "Según la información proporcionada..."); solo responde.
+- Prioriza sonar cálido y directo por sobre sonar completo: una respuesta corta y natural vale más que una perfecta pero acartonada.
+- Si ya respondiste algo parecido antes en esta misma charla, dilo distinto la segunda vez.
+
+ASÍ SUENA BIEN / ASÍ SUENA MAL (ejemplos, no copies las palabras exactas):
+- Bien: "Tenemos 2 modelos ahora mismo, ¿buscas algo para uso diario o algo más resistente?"
+  Mal: "Le informo que contamos con 2 modelos disponibles en este momento. ¿Desea que le proporcione más información?"
+- Bien: "Sí, me queda 1 en stock. ¿Te lo aparto?"
+  Mal: "Confirmo que la disponibilidad del producto es de 1 unidad. ¿Desea proceder con la compra?"
 
 CAPACIDADES:
 - Responder preguntas sobre productos y servicios
@@ -346,25 +381,16 @@ CAPACIDADES:
 - Ayudar con el proceso de compra
 - Proporcionar información sobre {company_name} (nombre, ubicación, contacto, etc.)
 
-INSTRUCCIONES IMPORTANTES:
-1. Si te preguntan sobre la empresa, el negocio, o información de contacto, SIEMPRE usa la información proporcionada arriba
-2. Cuando te saluden por primera vez, usa tu frase de saludo personalizada si está configurada
-3. Sé {'natural y conversacional' if formality == 'casual' else 'profesional y cortés'}
-4. {"Incluye precios cuando sea relevante" if include_pricing else "Evita mencionar precios específicos sin autorización"}
-5. {"Menciona disponibilidad cuando se pregunte por productos" if show_availability else "Confirma disponibilidad antes de mencionar stock"}
-6. Mantén las respuestas {"breves y directas" if response_length == "brief" else "completas pero concisas" if response_length == "concise" else "detalladas y explicativas"}
-7. Si no tienes información suficiente sobre un producto específico, pregunta educadamente para clarificar
-8. Si el usuario necesita hablar con una persona, facilita el proceso amablemente
-9. NUNCA digas que no conoces el nombre de la empresa o que no tienes información - TODA la información está en este prompt
-
-IMPORTANTE: 
-- El nombre de tu empresa es {company_name}
-- Tu nombre es {agent_name}
-- NO inventes información que no te proporcionen
-- NUNCA digas que un pedido está confirmado, registrado o listo si el RESULTADO DE ACCIÓN no lo dice: solo el sistema confirma pedidos
-- Si no hay productos disponibles o información específica sobre UN PRODUCTO, sé honesto
-- Pero SIEMPRE conoces la información básica de {company_name} que está arriba
-- Siempre busca ayudar al cliente de la mejor manera posible"""
+REGLAS QUE NO SE ROMPEN:
+- Si preguntan por la empresa, el negocio o el contacto, usa la información de arriba; nunca digas que no la tienes.
+- En el primer saludo de la charla, usa tu frase de saludo personalizada si está configurada arriba (sección FRASES PERSONALIZADAS).
+- {"Incluye precios cuando sea relevante" if include_pricing else "Evita mencionar precios específicos sin autorización"}.
+- {"Menciona disponibilidad cuando se pregunte por productos" if show_availability else "Confirma disponibilidad antes de mencionar stock"}.
+- Si no tienes información suficiente sobre un producto puntual, pregunta para aclarar en vez de inventar.
+- Si el cliente necesita hablar con una persona, facilita eso amablemente y deja de vender.
+- NUNCA digas que un pedido está confirmado, registrado o listo si el RESULTADO DE ACCIÓN no lo dice: solo el sistema confirma pedidos.
+- NO inventes información que no te dieron, pero SIEMPRE conoces los datos básicos de {company_name} que están arriba.
+- El nombre de tu empresa es {company_name} y tu nombre es {agent_name}."""
 
         return system_prompt
     
@@ -386,7 +412,12 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
                 content = msg.get("content", "")
                 prompt += f"{role}: {content}\n"
             prompt += "\n"
-        
+
+        openers = self._recent_openers(context.conversation_history)
+        if openers:
+            prompt += "NO repitas estas aperturas que ya usaste en esta charla:\n"
+            prompt += "\n".join(f'- "{o}..."' for o in openers) + "\n\n"
+
         # Add product information
         if context.relevant_products and len(context.relevant_products) > 0:
             prompt += "PRODUCTOS RELEVANTES:\n"
@@ -474,23 +505,19 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
 
         if context.action_type == "awaiting_payment_method_selection":
             return (
-                "¡Perfecto! Tenemos dos métodos de pago disponibles:\n\n"
-                "1️⃣ *QR* — Escanea el código con tu billetera digital y paga al instante.\n"
-                "2️⃣ *Físico / Efectivo* — Uno de nuestros representantes coordinará el pago contigo.\n\n"
-                "¿Cuál prefieres?"
+                "Puedes pagar con *QR* (escaneas y pagas al instante) o en *efectivo/físico* "
+                "(coordinamos contigo). ¿Cuál prefieres?"
             )
 
         if context.action_type == "payment_method_unclear":
             return (
-                "Disculpa, no entendí tu elección. 😊\n"
-                "Por favor indica si prefieres pagar con *QR* (billetera digital) o en *efectivo/físico*."
+                "No me quedó claro cuál elegiste 😊 ¿*QR* o *efectivo/físico*?"
             )
 
         if context.action_type == "physical_payment_initiated":
             return (
-                "✅ ¡Entendido! Tu pedido ha sido registrado para pago físico/efectivo. "
-                "Nuestro equipo revisará tu solicitud y se pondrá en contacto contigo para coordinar el pago. "
-                "¡Gracias por tu compra! 🎉"
+                "Listo, anoté tu pedido para pago físico/efectivo. Alguien del equipo te escribe "
+                "para coordinar el pago. ¡Gracias! 🎉"
             )
         
         # Simple template-based responses (placeholder)
@@ -561,7 +588,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
             return "Lo siento, ese producto no está disponible en este momento. ¿Te gustaría ver alternativas?"
         
         available_count = len(products)
-        response = f"Sí, tenemos {available_count} producto(s) disponible(s):\n\n"
+        response = f"Sí, tenemos {available_count} disponibles:\n\n"
         
         for product in products[:3]:
             response += f"• {product['name']} - {product['quantity']} unidades disponibles\n"
@@ -596,21 +623,21 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
                     "¡Gracias por tu compra! 🎉"
                 )
             elif action == "sale_completed":
-                return "¡Excelente! Tu compra ha sido confirmada. Nuestro equipo se pondrá en contacto contigo pronto."
+                return "Tu compra quedó confirmada. Nuestro equipo te escribe pronto."
             elif action == "qr_payment_failed":
                 return "Disculpa, tuvimos un problema al enviar el QR. Por favor intenta de nuevo o contacta con nuestro equipo."
             elif action == "qualify_lead":
-                return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Qué producto quieres y cuántas unidades?"
+                return "Con gusto. ¿Qué producto quieres y cuántas unidades?"
 
         # Default response
-        return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Qué producto te gustaría adquirir?"
+        return "Con gusto te ayudo. ¿Qué producto te interesa?"
     
     def _payment_proof_response(self, context: PipelineContext) -> str:
         """Generate response when payment proof is received."""
         
         if context.action_result:
             if context.action_result.get("supervisor_notified"):
-                return "✅ ¡Perfecto! Recibimos tu comprobante de pago. Nuestro equipo está revisando tu solicitud y se pondrá en contacto contigo pronto. ¡Gracias por tu compra! 🎉"
+                return "Recibimos tu comprobante, gracias. El equipo lo está revisando y te escribe pronto. 🎉"
             else:
                 return "⚠️ Recibimos tu comprobante, pero hubo un problema al notificar a nuestro equipo. Por favor contacta con nosotros directamente."
         

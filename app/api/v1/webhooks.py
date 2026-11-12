@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from app.core.config import settings
 from app.core.redis_client import is_msg_duplicate, set_msg_dedup
 from app.integrations.whatsapp.evolution import (
+    connection_update,
     normalize_evolution_webhook_payload,
     resolve_inbound_connection,
     skip_reason,
@@ -21,6 +22,7 @@ from app.integrations.whatsapp.evolution import (
 from app.integrations.whatsapp.validator import validate_evolution_webhook, validate_twilio_signature
 from app.schemas.pipeline import PipelineContext
 from app.schemas.webhook import TwilioWebhookRequest, WhatsAppWebhookRequest
+from app.services import connection_updates, turn_failure
 from app.services.batch_manager import enqueue_message
 from app.services.pipeline.runner import PipelineRunner
 
@@ -88,8 +90,9 @@ async def verify_webhook():
 async def receive_evolution_webhook(request: Request, background_tasks: BackgroundTasks):
     """Receive WhatsApp messages from Evolution webhook.
 
-    Only customer messages (messages.upsert, not fromMe, not groups) reach the pipeline; anything else gets
-    200 so Evolution does not retry it. The agent is the one that owns the instance named in the payload.
+    Only customer messages (messages.upsert, not fromMe, not groups) reach the pipeline; a connection.update
+    goes to the panel (Y-63); anything else gets 200 so Evolution does not retry it. The agent is the one
+    that owns the instance named in the payload.
     """
     is_valid = await validate_evolution_webhook(request=request, payload={})
     if not is_valid:
@@ -100,6 +103,11 @@ async def receive_evolution_webhook(request: Request, background_tasks: Backgrou
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    update = connection_update(payload)
+    if update:  # the phone linked, dropped or is reconnecting: the panel keeps the state and tells the business
+        background_tasks.add_task(connection_updates.forward, *update)
+        return {"status": "ok", "event": "connection.update"}
 
     reason = skip_reason(payload)
     if reason:
@@ -191,6 +199,7 @@ async def receive_twilio_webhook(
 async def process_message_pipeline(webhook_data: WhatsAppWebhookRequest):
     """Process incoming message through the pipeline."""
     start_time = datetime.utcnow()
+    context = None
 
     try:
         context = PipelineContext(
@@ -215,6 +224,7 @@ async def process_message_pipeline(webhook_data: WhatsAppWebhookRequest):
             action=result.action_executed,
             processing_time_ms=processing_time,
         )
+        await turn_failure.report(context, result=result)  # the customer is not left in silence (Y-63)
 
     except Exception as exc:
         processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
@@ -227,5 +237,5 @@ async def process_message_pipeline(webhook_data: WhatsAppWebhookRequest):
             processing_time_ms=processing_time,
         )
 
-        # TODO: Send error notification to monitoring system
-        # TODO: Send fallback message to user
+        if context is not None:
+            await turn_failure.report(context, exc=exc)

@@ -270,3 +270,34 @@ async def send_handoff_notification(chat_id: str, data: dict) -> None:
         logger.info("telegram_handoff_sent", chat_id=chat_id)
     except Exception as e:
         logger.error("telegram_handoff_failed", error=str(e))
+
+
+async def send_turn_failure_notification(chat_id: str, data: dict) -> bool:
+    """The agent could not answer a customer (Y-63): the supervisor should write to them."""
+    from html import escape
+
+    if not settings.telegram_bot_token:
+        return False
+    phone = escape(str(data.get("phone") or "N/A"))
+    who = f"{escape(str(data['name']))} ({phone})" if data.get("name") else phone
+    told = ("Le avisamos que una persona lo atenderá." if data.get("fallback_sent")
+            else "No pudimos avisarle: su WhatsApp tampoco respondió.")
+    text = (
+        f"⚠️ <b>EL AGENTE NO PUDO RESPONDER</b>\n\n"
+        f"📱 <b>Cliente:</b> {who}\n"
+        f"💬 <b>Escribió:</b> {escape(str(data.get('message') or '')[:500])}\n\n"
+        f"Hubo una falla técnica. {told} Escríbele por WhatsApp; el agente vuelve a responder solo en el siguiente mensaje."
+    )
+    if simulation.current():
+        simulation.capture("telegram", text=text, buttons=[])
+        return True
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            response.raise_for_status()
+        logger.info("telegram_turn_failure_sent", chat_id=chat_id)
+        return True
+    except Exception as e:
+        logger.error("telegram_turn_failure_failed", error=str(e))
+        return False

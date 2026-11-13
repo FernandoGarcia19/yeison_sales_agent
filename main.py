@@ -39,7 +39,11 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.version,
     debug=settings.debug,
-    lifespan=lifespan
+    lifespan=lifespan,
+    # Y-96: the route map is public otherwise (staging.yeison.cloud/agent/docs); only for local work
+    docs_url="/docs" if settings.debug else None,
+    redoc_url="/redoc" if settings.debug else None,
+    openapi_url="/openapi.json" if settings.debug else None,
 )
 
 # Include routers

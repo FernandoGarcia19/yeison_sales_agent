@@ -99,7 +99,7 @@ async def test_nothing_is_sent_from_an_unknown_number_or_in_the_test_chat(world)
     stranger.recipient_phone = "+59100000000"
     assert await turn_failure.report(stranger, exc=RuntimeError("boom")) is False
 
-    token = simulation.activate(simulation.SimulationRun())
+    token = simulation.activate(simulation.SimulationRun(tenant_id=1, agent_id=1, session_factory=None, customer_phone=CUSTOMER))
     try:
         assert await turn_failure.report(Context(), exc=RuntimeError("boom")) is False
     finally:

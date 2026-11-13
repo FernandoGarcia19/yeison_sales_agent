@@ -43,7 +43,7 @@ def captured(monkeypatch):
     monkeypatch.setattr(tw.httpx, "AsyncClient", client_factory)
     monkeypatch.setattr(settings, "backend_api_url", "http://panel/api/v1/")
     monkeypatch.setattr(settings, "backend_api_key", "internal-key")
-    monkeypatch.setattr(settings, "telegram_webhook_secret", None, raising=False)
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "tg-secret", raising=False)
     calls["panel_status"] = panel_status
     return calls
 
@@ -54,7 +54,7 @@ async def _post_update(text, user_id=777000111):
     update = {"update_id": 1, "message": {"message_id": 5, "text": text, "chat": {"id": user_id},
                                           "from": {"id": user_id, "username": "luis_tg", "language_code": "es"}}}
     async with _RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        return await client.post("/webhooks/telegram", json=update)
+        return await client.post("/webhooks/telegram", json=update, headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"})
 
 
 async def test_member_link_calls_panel_and_greets(captured):

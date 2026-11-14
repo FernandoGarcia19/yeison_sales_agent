@@ -128,3 +128,40 @@ async def test_photos_in_groups_are_ignored(captured):
                                           "photo": [{"file_id": "x"}]}}
     await _post(update)
     assert captured["panel"] == [] and captured["sent"] == []
+
+
+async def test_a_document_from_the_director_is_sent_after_the_text(captured, monkeypatch):
+    """Confirmar on an HR document (Y-81): the text replaces the buttons, then the PDF goes with sendDocument."""
+    from app.services import telegram_service
+
+    documents = []
+
+    async def fake_document(chat_id, content, filename, caption="", content_type="application/pdf"):
+        documents.append((chat_id, content, filename, caption))
+        return True
+
+    monkeypatch.setattr(telegram_service, "send_document", fake_document)
+    captured["answer"] = {"text": "✅ Listo. Te envío el PDF.", "buttons": [], "linked": True, "document": {
+        "filename": "certificado-de-trabajo-rosa-quispe.pdf", "content_base64": "JVBERi0xLjQ=",
+        "caption": "Certificado de trabajo · Rosa Quispe"}}
+    update = {"update_id": 5, "callback_query": {
+        "id": "cb2", "data": "dir_ok_ef", "from": {"id": 555},
+        "message": {"message_id": 43, "text": "¿Preparo este documento?", "chat": {"id": 555, "type": "private"}}}}
+    assert (await _post(update)).status_code == 200
+    assert captured["edited"] == [("555", 43, "¿Preparo este documento?\n\n✅ Listo. Te envío el PDF.")]
+    assert documents == [("555", b"%PDF-1.4", "certificado-de-trabajo-rosa-quispe.pdf",
+                          "Certificado de trabajo · Rosa Quispe")]
+
+
+async def test_a_document_that_cannot_be_sent_points_to_the_panel(captured, monkeypatch):
+    from app.services import telegram_service
+
+    async def failing(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(telegram_service, "send_document", failing)
+    captured["answer"] = {"text": "✅ Listo.", "buttons": [], "linked": True,
+                          "document": {"filename": "x.pdf", "content_base64": "JVBERi0xLjQ=", "caption": ""}}
+    await _post(_message("certificado de trabajo de Rosa"))
+    assert captured["sent"][0][1] == "✅ Listo."
+    assert "RRHH → Documentos" in captured["sent"][1][1]

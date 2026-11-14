@@ -272,6 +272,33 @@ async def send_handoff_notification(chat_id: str, data: dict) -> None:
         logger.error("telegram_handoff_failed", error=str(e))
 
 
+_MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
+
+
+async def send_document(chat_id: str, content: bytes, filename: str, caption: str = "",
+                        content_type: str = "application/pdf") -> bool:
+    """Send a file (an HR document from the Director, Y-81) with sendDocument. False when it was not sent."""
+    if not settings.telegram_bot_token:
+        logger.warning("telegram_bot_token_not_set")
+        return False
+    if not content or len(content) > _MAX_DOCUMENT_BYTES:
+        logger.error("telegram_document_invalid_size", chat_id=chat_id, size=len(content or b""))
+        return False
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendDocument"
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, data={"chat_id": chat_id, "caption": (caption or "")[:1024]},
+                                         files={"document": (filename or "documento.pdf", content, content_type)})
+            response.raise_for_status()
+        logger.info("telegram_document_sent", chat_id=chat_id, filename=filename)
+        return True
+    except httpx.HTTPStatusError as e:
+        logger.error("telegram_document_failed", error=str(e), response=e.response.text[:200])
+    except Exception as e:
+        logger.error("telegram_document_error", error=str(e))
+    return False
+
+
 async def send_turn_failure_notification(chat_id: str, data: dict) -> bool:
     """The agent could not answer a customer (Y-63): the supervisor should write to them."""
     from html import escape

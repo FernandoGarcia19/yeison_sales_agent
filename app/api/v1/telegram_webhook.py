@@ -236,6 +236,22 @@ async def _ask_director(path: str, body: dict) -> Optional[dict]:
     return None
 
 
+async def _send_director_document(chat_id: str, answer: Optional[dict]) -> None:
+    """The PDF the Director attached to its answer (an HR document, Y-81), after the text."""
+    document = (answer or {}).get("document")
+    if not document:
+        return
+    from app.services.telegram_service import send_document
+
+    try:
+        content = base64.b64decode(document.get("content_base64") or "", validate=True)
+    except (ValueError, TypeError):
+        content = b""
+    if not content or not await send_document(chat_id, content, document.get("filename") or "documento.pdf",
+                                              document.get("caption") or ""):
+        await _send_telegram_message(chat_id, "⚠️ No pude enviarte el PDF. Descárgalo del panel, en RRHH → Documentos.")
+
+
 def _inline_keyboard(buttons: list) -> Optional[dict]:
     if not buttons:
         return None
@@ -251,6 +267,7 @@ async def _forward_to_director(telegram_user_id, chat_id: str, text: str) -> Non
         await _send_telegram_message(chat_id, "⚠️ No pude responder ahora. Intenta de nuevo en un momento.")
         return
     await _send_telegram_message(chat_id, answer["text"], reply_markup=_inline_keyboard(answer.get("buttons")))
+    await _send_director_document(chat_id, answer)
 
 
 _MAX_PHOTO_BYTES = 8 * 1024 * 1024
@@ -300,6 +317,7 @@ async def _forward_photo_to_director(telegram_user_id, chat_id: str, file_id: st
         await _send_telegram_message(chat_id, "⚠️ No pude leer la factura ahora. Intenta de nuevo en un momento.")
         return
     await _send_telegram_message(chat_id, answer["text"], reply_markup=_inline_keyboard(answer.get("buttons")))
+    await _send_director_document(chat_id, answer)
 
 
 async def _forward_director_callback(telegram_user_id, chat_id: str, message_id: int, original_text: str,
@@ -312,6 +330,7 @@ async def _forward_director_callback(telegram_user_id, chat_id: str, message_id:
     combined = f"{original_text}\n\n{result}".strip()
     if not message_id or not await _replace_text_message(chat_id, message_id, combined):
         await _send_telegram_message(chat_id, result)
+    await _send_director_document(chat_id, answer)
 
 
 async def _replace_text_message(chat_id: str, message_id: int, text: str) -> bool:

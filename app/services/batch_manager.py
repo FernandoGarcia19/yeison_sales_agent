@@ -238,6 +238,7 @@ async def _acquire_run_lock(agent_phone: str, user_phone: str, token: str) -> bo
 
 async def _process_batch(agent_phone: str, user_phone: str):
     """Answer everything queued for this customer, one batch at a time."""
+    from app.services import turn_failure
     from app.services.pipeline.runner import PipelineRunner
 
     token = uuid.uuid4().hex
@@ -260,8 +261,10 @@ async def _process_batch(agent_phone: str, user_phone: str):
                 )
             else:
                 logger.error(f"Batch processing failed (message_sid={result.message_sid}, error={result.error})")
+                await turn_failure.report(context, result=result)  # the customer is not left in silence (Y-63)
         except Exception as e:
             logger.error(f"Error processing batch: {e}", exc_info=True)
+            await turn_failure.report(context, exc=e)
     finally:
         await release_token_lock(run_key, token)
         if not await list_length(build_batch_queue_key(agent_phone, user_phone)):

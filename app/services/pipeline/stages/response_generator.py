@@ -6,10 +6,15 @@ import json
 from typing import Optional
 from openai import AsyncOpenAI
 
-from app.schemas.pipeline import PipelineContext, IntentType
+from app.schemas.pipeline import ConversationState, PipelineContext, IntentType
 from app.services.pipeline.base import BasePipelineStage
 from app.integrations.whatsapp.client import send_whatsapp_message
+from app.integrations.whatsapp.formatting import to_whatsapp
 from app.core.config import settings
+from app.core.money import label as currency_label, money
+from app.services import cart, delivery
+from app.services import llm_usage
+from app.services.pipeline.llm_models import model_for, request_options
 
 
 class ResponseGeneratorStage(BasePipelineStage):
@@ -106,7 +111,6 @@ class ResponseGeneratorStage(BasePipelineStage):
         
         try:
             response = await self._generate_ai_response(context)
-            return response
         except Exception as e:
             self.log_error(
                 "ai_generation_failed",
@@ -114,7 +118,29 @@ class ResponseGeneratorStage(BasePipelineStage):
                 falling_back_to="template"
             )
             # Fallback to template-based responses
-            return self._generate_fallback_response(context)
+            response = self._generate_fallback_response(context)
+        return to_whatsapp(response)
+
+    @staticmethod
+    def _recent_openers(history: Optional[list], max_turns: int = 3, words: int = 6) -> list[str]:
+        """First few words of the agent's own last replies, to steer away from repeating them."""
+        if not history:
+            return []
+        openers = []
+        for msg in reversed(history):
+            if msg.get("role") != "assistant":
+                continue
+            content = (msg.get("content") or "").strip()
+            if content:
+                openers.append(" ".join(content.split()[:words]))
+            if len(openers) >= max_turns:
+                break
+        return openers
+
+    @staticmethod
+    def _currency(context: PipelineContext) -> str:
+        """The business's currency, loaded with the agent configuration (context_builder)."""
+        return ((context.agent_config or {}).get("tenant_info") or {}).get("currency") or "BOB"
     
     async def _generate_ai_response(self, context: PipelineContext) -> str:
         """Generate response using AI/LLM."""
@@ -126,7 +152,7 @@ class ResponseGeneratorStage(BasePipelineStage):
         user_prompt = self._build_user_prompt(context)
         
         client = self._get_client()
-        model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+        model = model_for("response")
         
         response = await client.chat.completions.create(
             model=model,
@@ -135,8 +161,9 @@ class ResponseGeneratorStage(BasePipelineStage):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=settings.openai_temperature,
-            extra_body={"max_completion_tokens": settings.openai_max_tokens}
+            extra_body=request_options(context, "response", max_completion_tokens=settings.openai_max_tokens)
         )
+        llm_usage.record(context, "sales.response", model, response)
         
         response_text = response.choices[0].message.content.strip()
         
@@ -219,11 +246,22 @@ class ResponseGeneratorStage(BasePipelineStage):
             "casual": "casual y relajado",
             "formal": "formal y respetuoso"
         }.get(tone, "amigable")
+
+        # Build formality guidance (never interpolate the raw token - it can be None)
+        formality_guide = {
+            "casual": "tuteo, cercano, como le hablarías a un conocido",
+            "formal": "de usted, respetuoso, sin perder calidez"
+        }.get(formality, "natural y cercano, ni acartonado ni demasiado informal")
         
         # Get additional business context from new config structure
         product_info = agent_config.get("product_info", {})
         operations_info = agent_config.get("operations_info", {})
-        
+
+        currency = self._currency(context)
+        price_rule = f"Escribe los precios en {currency_label(currency)}, por ejemplo «{money(25, currency)}»"
+        if currency_label(currency) != "$":
+            price_rule += "; nunca uses «$» ni otra moneda"
+
         system_prompt = f"""Eres {agent_name}, un asistente virtual de ventas para {company_name}.
 
 INFORMACIÓN DE LA EMPRESA:
@@ -234,8 +272,12 @@ INFORMACIÓN DE LA EMPRESA:
 - Sitio web: {tenant_info.get('website', 'N/A')}
 """
         
+        industry_rules = tenant_info.get("industry_rules") or []
+        if industry_rules:
+            system_prompt += "\nREGLAS DE NUESTRO RUBRO (síguelas siempre):\n" + "\n".join(f"- {rule}" for rule in industry_rules) + "\n"
+
         if contact_info and any(contact_info.values()):
-            system_prompt += f"""
+            system_prompt += """
 INFORMACIÓN DE CONTACTO:"""
             if contact_info.get('name'):
                 system_prompt += f"\n- Contacto: {contact_info.get('name')}"
@@ -286,6 +328,8 @@ TÉCNICAS DE CIERRE:
 {operations_info['closing_techniques']}
 """
         
+        system_prompt += "\n" + delivery.prompt_section(agent_config.get("delivery") or delivery.from_operations(None))
+
         if brand_voice:
             system_prompt += f"""
 VOZ DE MARCA:
@@ -310,10 +354,25 @@ FRASES PERSONALIZADAS:
         system_prompt += f"""
 PERSONALIDAD Y ESTILO:
 - Tono: {tone_guide}
-- Formalidad: {formality}
+- Formalidad: {formality_guide}
 - Emojis: {emoji_guide}
 - Longitud de respuesta: {length_guide}
 - SIEMPRE responde en ESPAÑOL
+- {price_rule}
+- Escribes por WhatsApp: para resaltar usa *un asterisco* (nunca **dos**); sin títulos con #, sin tablas
+
+CÓMO HABLAS (esto importa más que las reglas de abajo):
+- Escribes como una persona real texteando por WhatsApp, no como un documento ni como un bot leyendo un guion.
+- Varía cómo arrancas cada mensaje: no empieces todo con "¡Perfecto!", "¡Excelente!" o "¡Claro!" solo porque sonó bien una vez.
+- No repitas ni resumas lo que te dieron como si fuera un reporte (nada de "Según la información proporcionada..."); solo responde.
+- Prioriza sonar cálido y directo por sobre sonar completo: una respuesta corta y natural vale más que una perfecta pero acartonada.
+- Si ya respondiste algo parecido antes en esta misma charla, dilo distinto la segunda vez.
+
+ASÍ SUENA BIEN / ASÍ SUENA MAL (ejemplos, no copies las palabras exactas):
+- Bien: "Tenemos 2 modelos ahora mismo, ¿buscas algo para uso diario o algo más resistente?"
+  Mal: "Le informo que contamos con 2 modelos disponibles en este momento. ¿Desea que le proporcione más información?"
+- Bien: "Sí, me queda 1 en stock. ¿Te lo aparto?"
+  Mal: "Confirmo que la disponibilidad del producto es de 1 unidad. ¿Desea proceder con la compra?"
 
 CAPACIDADES:
 - Responder preguntas sobre productos y servicios
@@ -322,26 +381,99 @@ CAPACIDADES:
 - Ayudar con el proceso de compra
 - Proporcionar información sobre {company_name} (nombre, ubicación, contacto, etc.)
 
-INSTRUCCIONES IMPORTANTES:
-1. Si te preguntan sobre la empresa, el negocio, o información de contacto, SIEMPRE usa la información proporcionada arriba
-2. Cuando te saluden por primera vez, usa tu frase de saludo personalizada si está configurada
-3. Sé {'natural y conversacional' if formality == 'casual' else 'profesional y cortés'}
-4. {"Incluye precios cuando sea relevante" if include_pricing else "Evita mencionar precios específicos sin autorización"}
-5. {"Menciona disponibilidad cuando se pregunte por productos" if show_availability else "Confirma disponibilidad antes de mencionar stock"}
-6. Mantén las respuestas {"breves y directas" if response_length == "brief" else "completas pero concisas" if response_length == "concise" else "detalladas y explicativas"}
-7. Si no tienes información suficiente sobre un producto específico, pregunta educadamente para clarificar
-8. Si el usuario necesita hablar con una persona, facilita el proceso amablemente
-9. NUNCA digas que no conoces el nombre de la empresa o que no tienes información - TODA la información está en este prompt
+REGLAS QUE NO SE ROMPEN:
+- Si preguntan por la empresa, el negocio o el contacto, usa la información de arriba; nunca digas que no la tienes.
+- En el primer saludo de la charla, usa tu frase de saludo personalizada si está configurada arriba (sección FRASES PERSONALIZADAS).
+- {"Incluye precios cuando sea relevante" if include_pricing else "Evita mencionar precios específicos sin autorización"}.
+- {"Menciona disponibilidad cuando se pregunte por productos" if show_availability else "Confirma disponibilidad antes de mencionar stock"}.
+- Si no tienes información suficiente sobre un producto puntual, pregunta para aclarar en vez de inventar.
+- Si el cliente necesita hablar con una persona, facilita eso amablemente y deja de vender.
+- NUNCA digas que un pedido está confirmado, registrado o listo si el RESULTADO DE ACCIÓN no lo dice: solo el sistema confirma pedidos.
+- NO inventes información que no te dieron, pero SIEMPRE conoces los datos básicos de {company_name} que están arriba.
+- El nombre de tu empresa es {company_name} y tu nombre es {agent_name}."""
 
-IMPORTANTE: 
-- El nombre de tu empresa es {company_name}
-- Tu nombre es {agent_name}
-- NO inventes información que no te proporcionen
-- Si no hay productos disponibles o información específica sobre UN PRODUCTO, sé honesto
-- Pero SIEMPRE conoces la información básica de {company_name} que está arriba
-- Siempre busca ayudar al cliente de la mejor manera posible"""
+        state_instructions = self._state_instructions(context)
+        if state_instructions:
+            system_prompt += f"\n\nINSTRUCCIONES DE ESTADO ACTUAL:\n{state_instructions}"
 
         return system_prompt
+
+    def _state_instructions(self, context: PipelineContext) -> str:
+        """
+        Extra guidance based on where the conversation stands right now. Built here (after
+        action_executor ran) rather than in context_builder, which runs before it: computing
+        this from the pre-action state meant it could describe a state the turn had already
+        moved past (e.g. still asking for a checkout field action_executor just collected).
+        """
+        current_state = context.current_state
+        if current_state == ConversationState.BROWSING:
+            return "El cliente está mirando: responde sus preguntas sobre los productos."
+
+        if current_state == ConversationState.CART_BUILDING:
+            return (
+                "El cliente está armando su pedido (el carrito está en CARRITO ACTUAL). "
+                "Pregúntale si quiere algo más o si confirma el pedido."
+            )
+
+        if current_state == ConversationState.FULFILLMENT_COORD:
+            invoice_asked = bool(context.cart_contents.get("invoice_requested"))
+            missing = [
+                f for f in delivery.requirements(context.agent_config, context.cart_contents)
+                if not context.checkout_data.get(f)
+            ]
+            collected_str = ", ".join(f"{k}: {v}" for k, v in context.checkout_data.items()) if context.checkout_data else "ninguno aún"
+            missing_str = ", ".join(missing) if missing else "todos recopilados"
+            instructions = (
+                f"El usuario está listo para finalizar su compra. "
+                f"Datos ya recopilados: {collected_str}. "
+                f"Datos que aún faltan: {missing_str}. "
+                f"Pide amablemente la información faltante. NO envíes el QR ni menciones el pago "
+                f"hasta que el usuario haya proporcionado todos los datos requeridos."
+            )
+            if invoice_asked:
+                instructions += (
+                    " El cliente pidió factura: el NIT o CI y la razón social (los datos «para la factura») sirven para "
+                    "que el negocio la emita. No digas que ya fue emitida ni inventes su número."
+                )
+            return instructions
+
+        if current_state == ConversationState.AWAITING_PAYMENT_METHOD:
+            return (
+                "El usuario ya confirmó su compra y proporcionó todos los datos necesarios. "
+                "Ahora debe elegir su método de pago. Tenemos disponibles: pago con QR (billetera digital) "
+                "y pago físico/efectivo. Pregunta amablemente cuál prefiere. "
+                "No cambies de tema hasta recibir su respuesta."
+            )
+
+        if current_state == ConversationState.AWAITING_RECEIPT:
+            payment_method = context.cart_contents.get("payment_method", "qr")
+            proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
+            bank_charge = context.cart_contents.get("bank_qr") or {}
+            if bank_charge.get("status") == "pending":
+                return (
+                    "Le enviamos al usuario un QR del banco por el total exacto de su pedido. El pago se confirma "
+                    "solo: en cuanto el banco nos avise, le confirmamos por este chat. NO pidas comprobante. "
+                    "Si dice que ya pagó, dile que estamos esperando la confirmación del banco, que suele llegar "
+                    "en segundos. Si quiere cambiar el pedido, dile que lo puede hacer y que le enviaremos un QR nuevo."
+                )
+            if payment_method == "physical":
+                return (
+                    "El usuario eligió pago físico/efectivo. Su pedido fue enviado al supervisor para aprobación. "
+                    "Informa amablemente que su pedido está siendo revisado y que el equipo se pondrá en contacto "
+                    "para coordinar el pago. NO pidas ningún comprobante."
+                )
+            if proof_submitted:
+                return (
+                    "El usuario ya envió su comprobante de pago QR y está esperando la aprobación del supervisor. "
+                    "Informa amablemente que estamos revisando su pago y que recibirán una confirmación pronto. "
+                    "NO pidas el comprobante de nuevo."
+                )
+            return (
+                "Estamos esperando que el usuario envíe una foto o captura de su comprobante de pago QR. "
+                "No respondas preguntas no relacionadas. Recuérdales amablemente que deben enviar la imagen del comprobante."
+            )
+
+        return ""
     
     def _build_user_prompt(self, context: PipelineContext) -> str:
         """Build user prompt with conversation context."""
@@ -361,13 +493,18 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
                 content = msg.get("content", "")
                 prompt += f"{role}: {content}\n"
             prompt += "\n"
-        
+
+        openers = self._recent_openers(context.conversation_history)
+        if openers:
+            prompt += "NO repitas estas aperturas que ya usaste en esta charla:\n"
+            prompt += "\n".join(f'- "{o}..."' for o in openers) + "\n\n"
+
         # Add product information
         if context.relevant_products and len(context.relevant_products) > 0:
             prompt += "PRODUCTOS RELEVANTES:\n"
-            for product in context.relevant_products[:5]:
+            for product in context.relevant_products:
                 prompt += f"- {product.get('name', 'N/A')}\n"
-                prompt += f"  Precio: ${product.get('price', 'N/A')}\n"
+                prompt += f"  Precio: {money(product.get('price', 'N/A'), self._currency(context))}\n"
                 prompt += f"  Disponibilidad: {product.get('quantity', 0)} unidades\n"
                 if product.get('description'):
                     desc = product['description'][:100]
@@ -378,15 +515,60 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
         if context.lead_info:
             lead_name = context.lead_info.get('name', '')
             if lead_name:
-                prompt += f"INFORMACIÓN DEL CLIENTE:\n"
+                prompt += "INFORMACIÓN DEL CLIENTE:\n"
                 prompt += f"Nombre: {lead_name}\n"
                 prompt += f"Estado: {context.lead_info.get('status', 'nuevo')}\n\n"
         
+        # The cart as the code left it: the only order there is (Y-56)
+        items = (context.cart_contents or {}).get("items") or []
+        if items:
+            summary = cart.summary(items, self._currency(context))
+            prompt += "CARRITO ACTUAL (lo único que el cliente tiene pedido):\n"
+            prompt += "\n".join(f"- {line}" for line in summary["lines"]) + f"\nTotal: {summary['total']}\n\n"
+        changes = (context.action_result or {}).get("cart_changes") or []
+        if changes:
+            prompt += "CAMBIOS EN EL CARRITO EN ESTE MENSAJE (dilos tal cual):\n" + "\n".join(f"- {c}" for c in changes) + "\n\n"
+        prompt += (
+            "REGLA DEL CARRITO: solo di que agregaste, cambiaste o quitaste algo si figura en CAMBIOS EN EL CARRITO. "
+            "Si un producto no está en el catálogo, dilo y ofrece los parecidos de PRODUCTOS RELEVANTES. "
+            "Si no alcanzó el stock, di cuántos hay.\n\n"
+        )
+
         # Add action result if available
         if context.action_result:
-            prompt += f"RESULTADO DE ACCIÓN EJECUTADA:\n"
+            action = context.action_result.get("action")
+            if action == "handoff":
+                prompt += ("EL CLIENTE PIDIÓ HABLAR CON UNA PERSONA: dile en una línea que una persona del equipo le escribirá "
+                           "por este chat" + ("" if context.action_result.get("notified") else
+                                              " (todavía no pudimos avisar al equipo: pídele que espere un momento)") +
+                           ". No sigas vendiendo.\n\n")
+            elif context.action_type in ("product_inquiry", "pricing_inquiry", "availability_check"):
+                prompt += ("Si el cliente muestra interés en un producto, termina con una pregunta que lo lleve a pedir "
+                           "(por ejemplo «¿Te preparo 2?»).\n\n")
+            if context.action_result.get("previous_order_discarded"):
+                prompt += ("El cliente vuelve después de un tiempo: su pedido anterior sin pagar se descartó. Salúdalo y, "
+                           "si corresponde, pregúntale si quiere armarlo de nuevo.\n\n")
+            if action == "collect_checkout_data" and items:
+                # Y-56: the customer sees what they are buying before giving their data
+                prompt += "Antes de pedir los datos, muestra el pedido (CARRITO ACTUAL) con su total.\n\n"
+            elif action == "order_cancelled":
+                prompt += "EL CLIENTE CANCELÓ EL PEDIDO: el carrito quedó vacío. Confírmaselo en una línea y ofrece ayuda.\n\n"
+            elif action == "cart_updated":
+                next_step = context.action_result.get("next")
+                prompt += {
+                    "collect_checkout_data": "Muestra el pedido actualizado con su total y pide los datos que faltan.\n\n",
+                    "choose_payment_method": "Muestra el pedido actualizado con su total y pregunta cómo quiere pagar.\n\n",
+                    "cart_empty": "El pedido quedó vacío. Dilo y pregunta si quiere otra cosa.\n\n",
+                }.get(next_step, "Muestra el pedido actualizado con su total y pregunta si lo confirma o quiere algo más.\n\n")
+            prompt += "RESULTADO DE ACCIÓN EJECUTADA:\n"
             prompt += f"Acción: {context.action_type}\n"
             prompt += f"Resultado: {json.dumps(context.action_result, ensure_ascii=False)}\n\n"
+            if context.action_result.get("action") == "qualify_lead":
+                # The customer has not confirmed: the order does not exist yet
+                prompt += (
+                    "EL PEDIDO TODAVÍA NO ESTÁ CONFIRMADO NI REGISTRADO: no digas que está confirmado, listo o registrado. "
+                    "Resume lo que quiere (producto, cantidad y total) y pregúntale si confirma el pedido.\n\n"
+                )
         
         prompt += """Genera una respuesta natural y útil para el usuario basándote en toda la información proporcionada.
 NO repitas lo que el usuario dijo, simplemente responde de manera natural y útil."""
@@ -404,23 +586,19 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
 
         if context.action_type == "awaiting_payment_method_selection":
             return (
-                "¡Perfecto! Tenemos dos métodos de pago disponibles:\n\n"
-                "1️⃣ *QR* — Escanea el código con tu billetera digital y paga al instante.\n"
-                "2️⃣ *Físico / Efectivo* — Uno de nuestros representantes coordinará el pago contigo.\n\n"
-                "¿Cuál prefieres?"
+                "Puedes pagar con *QR* (escaneas y pagas al instante) o en *efectivo/físico* "
+                "(coordinamos contigo). ¿Cuál prefieres?"
             )
 
         if context.action_type == "payment_method_unclear":
             return (
-                "Disculpa, no entendí tu elección. 😊\n"
-                "Por favor indica si prefieres pagar con *QR* (billetera digital) o en *efectivo/físico*."
+                "No me quedó claro cuál elegiste 😊 ¿*QR* o *efectivo/físico*?"
             )
 
         if context.action_type == "physical_payment_initiated":
             return (
-                "✅ ¡Entendido! Tu pedido ha sido registrado para pago físico/efectivo. "
-                "Nuestro equipo revisará tu solicitud y se pondrá en contacto contigo para coordinar el pago. "
-                "¡Gracias por tu compra! 🎉"
+                "Listo, anoté tu pedido para pago físico/efectivo. Alguien del equipo te escribe "
+                "para coordinar el pago. ¡Gracias! 🎉"
             )
         
         # Simple template-based responses (placeholder)
@@ -453,7 +631,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         if len(context.conversation_history) == 0:
             return f"¡Hola! Soy {agent_name}, tu asistente de ventas. ¿En qué puedo ayudarte hoy?"
         else:
-            return f"¡Hola de nuevo! ¿En qué más puedo ayudarte?"
+            return "¡Hola de nuevo! ¿En qué más puedo ayudarte?"
     
     def _product_inquiry_response(self, context: PipelineContext) -> str:
         """Generate product inquiry response."""
@@ -464,7 +642,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         
         response = "Tenemos estos productos disponibles:\n\n"
         for product in products[:3]:  # Limit to 3 products
-            response += f"• {product['name']} - ${product['price']}\n"
+            response += f"• {product['name']} - {money(product['price'], self._currency(context))}\n"
             response += f"  {product['description'][:50]}...\n\n"
         
         response += "¿Te interesa alguno en particular?"
@@ -479,7 +657,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         
         response = "Aquí están los precios:\n\n"
         for product in products[:3]:
-            response += f"• {product['name']}: ${product['price']}\n"
+            response += f"• {product['name']}: {money(product['price'], self._currency(context))}\n"
         
         return response
     
@@ -491,7 +669,7 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
             return "Lo siento, ese producto no está disponible en este momento. ¿Te gustaría ver alternativas?"
         
         available_count = len(products)
-        response = f"Sí, tenemos {available_count} producto(s) disponible(s):\n\n"
+        response = f"Sí, tenemos {available_count} disponibles:\n\n"
         
         for product in products[:3]:
             response += f"• {product['name']} - {product['quantity']} unidades disponibles\n"
@@ -526,21 +704,21 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
                     "¡Gracias por tu compra! 🎉"
                 )
             elif action == "sale_completed":
-                return "¡Excelente! Tu compra ha sido confirmada. Nuestro equipo se pondrá en contacto contigo pronto."
+                return "Tu compra quedó confirmada. Nuestro equipo te escribe pronto."
             elif action == "qr_payment_failed":
                 return "Disculpa, tuvimos un problema al enviar el QR. Por favor intenta de nuevo o contacta con nuestro equipo."
             elif action == "qualify_lead":
-                return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Cuál plan te interesa? (Plan Estándar $100/mes o Plan Premium $200/mes)"
+                return "Con gusto. ¿Qué producto quieres y cuántas unidades?"
 
         # Default response
-        return "¡Excelente! Me encantaría ayudarte con tu compra. ¿Qué producto te gustaría adquirir?"
+        return "Con gusto te ayudo. ¿Qué producto te interesa?"
     
     def _payment_proof_response(self, context: PipelineContext) -> str:
         """Generate response when payment proof is received."""
         
         if context.action_result:
             if context.action_result.get("supervisor_notified"):
-                return "✅ ¡Perfecto! Recibimos tu comprobante de pago. Nuestro equipo está revisando tu solicitud y se pondrá en contacto contigo pronto. ¡Gracias por tu compra! 🎉"
+                return "Recibimos tu comprobante, gracias. El equipo lo está revisando y te escribe pronto. 🎉"
             else:
                 return "⚠️ Recibimos tu comprobante, pero hubo un problema al notificar a nuestro equipo. Por favor contacta con nosotros directamente."
         
@@ -590,13 +768,14 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
                         intent_confidence=context.intent_confidence
                     )
                 
-                # Add single assistant response (whether batch or not)
-                conversation.add_message(
-                    role="assistant",
-                    content=context.response_text,
-                    message_sid=context.action_result.get("message_sid") if context.action_result else None,
-                    action_type=context.action_type
-                )
+                # Add single assistant response (whether batch or not); none while a person attends (paused)
+                if context.response_text:
+                    conversation.add_message(
+                        role="assistant",
+                        content=context.response_text,
+                        message_sid=context.action_result.get("message_sid") if context.action_result else None,
+                        action_type=context.action_type
+                    )
                 
                 # Update state machine fields
                 if context.current_state is not None:

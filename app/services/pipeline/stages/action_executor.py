@@ -4,18 +4,29 @@ Action executor stage - executes actions based on intent.
 
 import json
 from typing import Optional, List
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime
+from sqlalchemy import select, text, update
+from datetime import datetime, timedelta
 
 from openai import AsyncOpenAI
 
 from app.schemas.pipeline import PipelineContext, IntentType, ConversationState
-from app.services.pipeline.base import BasePipelineStage, ActionExecutionError
+from app.services.pipeline.base import BasePipelineStage
 from app.services.notification_service import NotificationService
 from app.models import Lead, SalesConversation
 from app.core.database import get_session_factory
+from app.core import simulation
 from app.core.config import settings
+from app.core.money import money
+from app.services import bank_qr, cart, delivery, handoff, invoice_request, llm_usage, purchase_confirmation
+from app.services.pipeline.llm_models import model_for, request_options
+
+
+# Before payment the cart can still change (Y-56)
+CART_STATES = (
+    ConversationState.CART_BUILDING,
+    ConversationState.FULFILLMENT_COORD,
+    ConversationState.AWAITING_PAYMENT_METHOD,
+)
 
 
 class ActionExecutorStage(BasePipelineStage):
@@ -54,6 +65,42 @@ class ActionExecutorStage(BasePipelineStage):
             action_type=context.action_type
         )
 
+        # A person took over this customer: stay quiet until resumed or the pause ends (Y-58)
+        if context.current_state == ConversationState.PAUSED:
+            if handoff.is_paused(context.cart_contents):
+                context.action_type = "paused"
+                context.action_result = {"action": "paused"}
+                context.response_already_sent = True
+                context.response_text = None
+                return context
+            context.current_state = ConversationState(handoff.resume(context.cart_contents))
+
+        settings_ = (context.agent_config or {}).get("conversation_settings") or {}
+        if context.intent == IntentType.HANDOFF_REQUEST or handoff.asks_for_person(
+            context.message_body, settings_.get("handoff_to_human_keywords")
+        ):
+            await self._handle_handoff_request(context)
+            return context
+
+        # A cart left untouched too long is dropped; the reply welcomes the customer back (Y-58)
+        stale_cart = context.current_state in CART_STATES and self._cart_is_stale(context)
+        if stale_cart:
+            self._clear_cart(context)
+
+        await self._note_invoice_request(context)
+        self._note_delivery_method(context)
+
+        # Changes to the cart before paying: add, change, remove or cancel (Y-56)
+        if (
+            context.current_state in CART_STATES
+            and context.cart_contents.get("items")
+            and context.action_type != "payment_proof_received"
+            and cart.might_edit(context.message_body, self._cart_catalogue(context))
+            and await self._handle_cart_edit(context)
+        ):
+            self.log_info("action_executed", action_type=context.action_type)
+            return context
+
         # If the customer is choosing between payment methods, intercept before normal routing.
         if context.current_state == ConversationState.AWAITING_PAYMENT_METHOD:
             await self._handle_payment_method_selection(context)
@@ -61,6 +108,20 @@ class ActionExecutorStage(BasePipelineStage):
 
         # If waiting for payment proof, only allow payment_proof_received through
         if context.current_state == ConversationState.AWAITING_RECEIPT:
+            charge = bank_qr.pending_charge(context.cart_contents)
+            if charge and await self._bank_qr_paid(context, charge):
+                return context
+            if (charge and context.action_type != "payment_proof_received" and bank_qr.is_expired(charge)
+                    and await self._handle_bank_qr_flow(context, renewed=True)):
+                # The QR expired unpaid: a new one for the same total (the old one is still checked)
+                return context
+            if charge and context.action_type != "payment_proof_received":
+                context.action_type = "awaiting_bank_payment"
+                context.action_result = {
+                    "action": "awaiting_bank_payment",
+                    "amount": bank_qr.amount_label(charge.get("amount", 0), charge.get("currency", "BOB")),
+                }
+                return context
             if context.action_type != "payment_proof_received":
                 proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
                 if proof_submitted:
@@ -84,6 +145,16 @@ class ActionExecutorStage(BasePipelineStage):
         if context.action_type == "payment_proof_received":
             await self._handle_payment_proof_received(context)
         
+        # "Sí" / "dale" right after the agent offered the order: the classifier sees no
+        # purchase in two letters, but the customer is closing it
+        elif (
+            context.intent != IntentType.PURCHASE_INTENT
+            and context.current_state in (None, ConversationState.BROWSING, ConversationState.CART_BUILDING)
+            and purchase_confirmation.confirms_offer(context.message_body, context.conversation_history)
+        ):
+            context.intent = IntentType.PURCHASE_INTENT
+            await self._handle_purchase_intent(context)
+
         # Route to appropriate action based on intent
         elif context.intent == IntentType.PRODUCT_INQUIRY:
             await self._handle_product_inquiry(context)
@@ -109,13 +180,36 @@ class ActionExecutorStage(BasePipelineStage):
         else:
             await self._handle_general_question(context)
         
+        if stale_cart:
+            context.action_result = {**(context.action_result or {}), "previous_order_discarded": True}
+
         self.log_info(
             "action_executed",
             action_type=context.action_type
         )
-        
+
         return context
-    
+
+    def _note_delivery_method(self, context: PipelineContext) -> None:
+        """«Paso a recogerlo» / «envíamelo a casa»: how the order leaves the shop decides what is asked."""
+        if context.current_state not in (None, ConversationState.BROWSING, *CART_STATES):
+            return
+        method = delivery.detect_method(context.message_body)
+        options = (context.agent_config or {}).get("delivery") or delivery.from_operations(None)
+        if method and method in delivery.methods(options):
+            context.cart_contents["delivery_method"] = method
+
+    def _cart_is_stale(self, context: PipelineContext) -> bool:
+        settings_ = (context.agent_config or {}).get("conversation_settings") or {}
+        minutes = settings_.get("session_timeout_minutes") or 24 * 60
+        last = next((m.get("timestamp") for m in reversed(context.conversation_history or []) if m.get("timestamp")), None)
+        if not last:
+            return False
+        try:
+            return datetime.utcnow() - datetime.fromisoformat(last) > timedelta(minutes=float(minutes))
+        except (TypeError, ValueError):
+            return False
+
     async def _handle_product_inquiry(self, context: PipelineContext):
         """Handle product inquiry intent."""
         context.action_type = "product_inquiry"
@@ -164,34 +258,33 @@ class ActionExecutorStage(BasePipelineStage):
                 context.action_result = {"action": "order_already_completed"}
                 return
 
-        if not is_purchase_confirmed:
-            # Just qualify the lead, not ready to purchase yet
+        changes: list = []
+        if not context.cart_contents.get("items"):
+            changes = await self._fill_cart(context, confirmed=is_purchase_confirmed)
+
+        if not context.cart_contents.get("items"):
+            # Nothing identifiable to sell: ask for the product instead of collecting data
+            # (and notifying the supervisor) for an empty order
             context.action_result = {
                 "lead_id": context.lead_info.get("id") if context.lead_info else None,
                 "action": "qualify_lead",
-                "stage": "considering"
+                "stage": "considering",
+                "missing": "product",
+                "cart_changes": cart.describe_changes(changes),
             }
             return
 
-        # Capture which products (and quantities) the user wants — only on the
-        # first turn of this purchase intent so we don't overwrite a stored cart.
-        if not context.cart_contents.get("items"):
-            extracted = await self._extract_purchase_items(
-                context.message_body, context.conversation_history, context.relevant_products
-            )
-            selected = []
-            for entry in extracted:
-                prod = next(
-                    (p for p in context.relevant_products if str(p.get("id")) == str(entry.get("id"))),
-                    None,
-                )
-                if prod:
-                    selected.append({**prod, "quantity": int(entry.get("quantity", 1))})
-            if not selected and len(context.relevant_products) == 1:
-                # Single product available — treat it as the selection
-                selected = [{**context.relevant_products[0], "quantity": 1}]
-            if selected:
-                context.cart_contents["items"] = selected
+        if not is_purchase_confirmed:
+            # The cart is ready; the customer still has to confirm it
+            context.current_state = ConversationState.CART_BUILDING
+            context.action_result = {
+                "lead_id": context.lead_info.get("id") if context.lead_info else None,
+                "action": "qualify_lead",
+                "stage": "considering",
+                "cart": cart.summary(context.cart_contents["items"], self._currency(context)),
+                "cart_changes": cart.describe_changes(changes),
+            }
+            return
 
         # Gate: all checkout data must be collected before payment
         required_fields = self._get_checkout_requirements(context)
@@ -204,6 +297,8 @@ class ActionExecutorStage(BasePipelineStage):
                 "required_fields": required_fields,
                 "missing_fields": missing_fields,
                 "collected": context.checkout_data,
+                "cart": cart.summary(context.cart_contents["items"], self._currency(context)),
+                "cart_changes": cart.describe_changes(changes),
             }
             return
 
@@ -223,43 +318,22 @@ class ActionExecutorStage(BasePipelineStage):
     
     async def _is_purchase_confirmed(self, context: PipelineContext) -> bool:
         """
-        Determine if the customer has confirmed their purchase.
-        
-        Uses keyword-based detection to identify purchase confirmation.
-        Does NOT require products in context since customer may have already
-        seen product info in previous messages.
+        Whether the customer closed the purchase with this message (app/services/purchase_confirmation.py):
+        a closing phrase ("confírmalo", "quiero pagar", "me llevo 2") or a "sí" to the agent's offer.
+        Does NOT require products in context: the customer may have seen them in earlier messages.
         """
-        message_lower = context.message_body.lower()
-        
-        # Keywords that indicate purchase confirmation
-        confirmation_keywords = [
-            "confirmo",
-            "confirmado",
-            "confirmar",
-            "compro",
-            "comprar",
-            "acepto",
-            "si, lo quiero",
-            "lo quiero",
-            "proceder con la compra",
-            "realizar el pago",
-            "hacer el pago",
-            "pagar ahora",
-            "enviar",
-            "envío",
-            "quiero comprar",
-            "voy a comprar",
-            "compro el plan",
-            "quiero el plan",
-        ]
-        
-        # Check if any confirmation keyword is in the message
-        for keyword in confirmation_keywords:
-            if keyword in message_lower:
-                return True
-        
-        return False
-    
+        if purchase_confirmation.closes_purchase(context.message_body):
+            return True
+        if context.current_state == ConversationState.ORDER_COMPLETED:
+            # "ok, gracias" after a finished order is not a new one
+            return False
+        return purchase_confirmation.confirms_offer(context.message_body, context.conversation_history)
+
+    @staticmethod
+    def _currency(context: PipelineContext) -> str:
+        """The business's currency, loaded with the agent configuration (context_builder)."""
+        return ((context.agent_config or {}).get("tenant_info") or {}).get("currency") or "BOB"
+
     async def _is_qr_payment_enabled(self, context: PipelineContext) -> bool:
         """
         Check if QR payment is enabled for the active agent.
@@ -312,9 +386,12 @@ class ActionExecutorStage(BasePipelineStage):
                     return {"qr": False, "physical": True}
 
                 sales_process = (agent.configuration or {}).get("sales_process") or {}
+                bank = bank_qr.enabled_for(sales_process)
                 return {
-                    "qr": bool(sales_process.get("QR_payment")),
+                    # The bank QR is a QR payment too: the customer chooses "QR" either way
+                    "qr": bool(sales_process.get("QR_payment")) or bank,
                     "physical": bool(sales_process.get("physical_payment")),
+                    "bank_qr": bank,
                 }
 
         except Exception as e:
@@ -393,8 +470,12 @@ class ActionExecutorStage(BasePipelineStage):
         2. Mark action as waiting for payment proof
         3. Response generator will wait for next message (payment proof)
         """
+        payment_methods = await self._get_payment_methods_enabled(context)
+        if payment_methods.get("bank_qr") and await self._handle_bank_qr_flow(context):
+            return
+
         qr_url = await self._get_qr_payment_url(context)
-        
+
         self.log_info(
             "qr_payment_flow_started",
             tenant_id=context.tenant_id,
@@ -464,6 +545,109 @@ class ActionExecutorStage(BasePipelineStage):
                 "error": str(e)
             }
     
+    async def _handle_bank_qr_flow(self, context: PipelineContext, renewed: bool = False) -> bool:
+        """
+        Charge with a single-use bank QR for the exact cart total (SIP, see app/services/bank_qr.py).
+        Returns False when it cannot (no total, unsupported currency, service down), so the
+        caller falls back to the static QR image. `renewed`: the previous QR expired unpaid.
+        """
+        items = context.cart_contents.get("items") or []
+        total = bank_qr.cart_total(items)
+        if total <= 0:
+            self.log_error("bank_qr_no_total", conversation_id=context.conversation_id)
+            return False
+        currency = await bank_qr.tenant_currency(context.tenant_id)
+        if currency not in bank_qr.SUPPORTED_CURRENCIES:
+            self.log_error("bank_qr_unsupported_currency", currency=currency)
+            return False
+
+        previous = bank_qr.pending_charge(context.cart_contents)
+        if previous:
+            # A new QR replaces the old one: it must not be payable anymore
+            try:
+                await bank_qr.disable_charge(previous["alias"])
+            except bank_qr.BankQrError as e:
+                self.log_error("bank_qr_disable_failed", alias=previous.get("alias"), error=str(e))
+
+        try:
+            charge = await bank_qr.create_charge(
+                context.tenant_id, total, currency, bank_qr.glosa(context.conversation_id, context.lead_id)
+            )
+            object_key = f"payments/bank_qr/tenant_{context.tenant_id}/{charge['alias']}.png"
+            from app.services import r2_storage
+            await r2_storage.upload_bytes(object_key, bank_qr.qr_png(charge), "image/png")
+            # The test chat draws its own placeholder for the QR
+            qr_url = ("simulated://bank-qr" if simulation.current()
+                      else r2_storage.get_presigned_url(object_key, expires_in=900))
+        except Exception as e:
+            self.log_error("bank_qr_create_failed", error=str(e), error_type=type(e).__name__)
+            return False
+
+        amount = bank_qr.amount_label(total, currency)
+        greeting = f"¡Hola {context.profile_name}! " if context.profile_name else ""
+        if renewed:
+            greeting = f"{greeting}Tu QR anterior venció, así que te envío uno nuevo. "
+        body = (
+            f"{greeting}Tu total es de *{amount}*. 🧾\n\n"
+            f"Escanea este QR con la app de cualquier banco. Es solo para este pedido y vence el "
+            f"{charge.get('fechaVencimiento', '')}.\n\n"
+            f"Cuando pagues, el banco nos avisa y te confirmamos al instante: no hace falta que envíes el comprobante."
+        )
+        try:
+            from app.integrations.whatsapp.client import send_whatsapp_message
+            await send_whatsapp_message(to=context.sender_phone, body=body,
+                                        from_number=context.recipient_phone, media_url=qr_url)
+        except Exception as e:
+            self.log_error("bank_qr_send_failed", error=str(e))
+            try:
+                await bank_qr.disable_charge(charge["alias"])
+            except bank_qr.BankQrError:
+                pass
+            return False
+
+        context.cart_contents["payment_method"] = "qr"
+        context.cart_contents["bank_qr"] = {
+            "alias": charge["alias"],
+            "amount": str(total),
+            "currency": currency,
+            "expires": charge.get("fechaVencimiento"),
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        try:
+            # The QR's own row: checked by the poller whatever happens to the conversation
+            await bank_qr.register_charge(
+                alias=charge["alias"], tenant_id=context.tenant_id, agent_instance_id=context.agent_instance_id,
+                conversation_id=context.conversation_id, lead_id=context.lead_id, amount=total,
+                currency=currency, cart_contents=context.cart_contents, expires=charge.get("fechaVencimiento"),
+                replaces=(previous or {}).get("alias"),
+            )
+        except Exception as e:
+            # The cart still has it: the poller adopts it from the conversation
+            self.log_error("bank_qr_register_failed", alias=charge["alias"], error=str(e))
+        context.current_state = ConversationState.AWAITING_RECEIPT
+        context.action_type = "awaiting_bank_payment"
+        context.action_result = {"action": "awaiting_bank_payment", "qr_sent": True, "amount": amount,
+                                 "renewed": renewed}
+        context.response_already_sent = True
+        context.response_text = f"📲 [QR del banco por {amount} enviado al cliente]"
+        self.log_info("bank_qr_sent", alias=charge["alias"], amount=str(total), currency=currency)
+        return True
+
+    async def _bank_qr_paid(self, context: PipelineContext, charge: dict) -> bool:
+        """Ask the bank whether the pending QR was paid; if so the sale is recorded and the customer told."""
+        outcome = await bank_qr.check_and_confirm(charge["alias"], source="customer_message")
+        if outcome not in ("recorded", "already_recorded", "duplicate"):
+            return False
+        context.cart_contents["bank_qr"] = {**charge, "status": "paid"}
+        context.current_state = ConversationState.ORDER_COMPLETED
+        context.action_type = "bank_payment_confirmed"
+        context.action_result = {"action": "bank_payment_confirmed"}
+        # confirm_payment already sent the confirmation to the customer
+        context.response_already_sent = True
+        context.response_text = "✅ [Pago confirmado por el banco]"
+        return True
+
     async def _is_sale_complete(self, context: PipelineContext) -> bool:
         """
         Determine if the purchase intent represents a completed sale.
@@ -502,18 +686,49 @@ class ActionExecutorStage(BasePipelineStage):
         
         return False
 
+    async def _tenant_invoices(self, context: PipelineContext) -> bool:
+        """Only businesses in the general tax regime invoice; for the rest nothing is collected."""
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as db:
+                regime = (await db.execute(
+                    text("select tax_regime_code from tenant where id = :id"), {"id": context.tenant_id}
+                )).scalar_one_or_none()
+            return regime == "general"
+        except Exception as e:
+            self.log_error("tenant_regime_lookup_failed", error=str(e))
+            return False
+
+    async def _note_invoice_request(self, context: PipelineContext) -> None:
+        """Remember that the customer asked for an invoice (or changed their mind), Y-44."""
+        asked = invoice_request.mentions_invoice(context.message_body)
+        if asked is None:
+            return
+        if asked is False:
+            if context.cart_contents.pop("invoice_requested", None):
+                for key in [k for k in context.checkout_data if invoice_request.is_invoice_field(k)]:
+                    context.checkout_data.pop(key, None)
+                context.cart_contents["checkout_data"] = context.checkout_data
+                self.log_info("invoice_request_withdrawn")
+            return
+        if context.cart_contents.get("invoice_requested"):
+            return
+        if not await self._tenant_invoices(context):
+            self.log_info("invoice_asked_but_tenant_does_not_invoice")
+            return
+        context.cart_contents["invoice_requested"] = True
+        self.log_info("invoice_requested")
+
     def _get_checkout_requirements(self, context: PipelineContext) -> List[str]:
-        """Return list of required checkout fields from agent config."""
-        reqs = context.agent_config.get("checkout_requirements") if context.agent_config else None
-        if isinstance(reqs, list) and reqs:
-            return reqs
-        return ["Nombre completo", "Dirección de entrega", "NIT"]
+        """Checkout fields by delivery method (Y-58), or the agent's own list; invoice data on top."""
+        return delivery.requirements(context.agent_config, context.cart_contents)
 
     async def _extract_checkout_fields(
         self,
         message: str,
         required_fields: List[str],
         already_collected: dict,
+        context: Optional[PipelineContext] = None,
     ) -> dict:
         """Use LLM to extract checkout fields present in the user's message."""
         missing = [f for f in required_fields if not already_collected.get(f)]
@@ -531,67 +746,145 @@ class ActionExecutorStage(BasePipelineStage):
 
         try:
             client = self._get_client()
-            model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+            model = model_for("checkout_extraction")
             response = await client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                extra_body={"max_completion_tokens": 200},
+                extra_body=request_options(context, "checkout_extraction", max_completion_tokens=200),
                 response_format={"type": "json_object"},
             )
+            llm_usage.record(context, "sales.checkout_extraction", model, response)
             result = json.loads(response.choices[0].message.content.strip())
             return {k: v for k, v in result.items() if k in required_fields and v}
         except Exception as e:
             self.log_error("checkout_extraction_failed", error=str(e))
             return {}
 
-    async def _extract_purchase_items(
-        self,
-        message: str,
-        conversation_history: list,
-        available_products: list,
-    ) -> list:
-        """Use LLM to identify which products (and quantities) the user wants to buy."""
-        if not available_products or not message.strip():
-            return []
+    def _cart_catalogue(self, context: PipelineContext) -> list:
+        """The products a cart operation may name: this turn's catalogue match plus what is in the cart."""
+        seen = {str(p.get("id")) for p in context.relevant_products}
+        return list(context.relevant_products) + [
+            line for line in context.cart_contents.get("items") or [] if str(line.get("id")) not in seen
+        ]
+
+    async def _extract_cart_operations(self, context: PipelineContext) -> dict:
+        """Ask the small model what this message does to the cart. The code applies it (app/services/cart.py)."""
+        if not (context.message_body or "").strip():
+            return {"operations": [], "cancel": False}
+        products = self._cart_catalogue(context)
 
         products_str = "\n".join(
             f'- id={p.get("id")}, name="{p.get("name") or p.get("product_name", "")}", price={p.get("price", 0)}'
-            for p in available_products
+            for p in products
+        ) or "(none)"
+        cart_str = "\n".join(
+            f'- id={line.get("id")}, name="{line.get("name")}", quantity={line.get("quantity")}'
+            for line in context.cart_contents.get("items") or []
+        ) or "(empty)"
+        history_str = "\n".join(
+            f'{"Customer" if m.get("role") == "user" else "Agent"}: {m.get("content", "")}'
+            for m in (context.conversation_history or [])[-5:]
         )
-        history_str = ""
-        if conversation_history:
-            recent = conversation_history[-5:]
-            history_str = "\n".join(
-                f'{"Usuario" if m.get("role") == "user" else "Agente"}: {m.get("content", "")}'
-                for m in recent
-            )
-
         prompt = (
-            "From the conversation below, identify which products the user wants to purchase and in what quantity.\n"
-            'Return a JSON object with key "items" containing a list of {"id": <product_id>, "quantity": <int>}.\n'
-            "Only include products explicitly chosen by the user. Default quantity to 1 if not stated.\n"
-            'If no specific product is identifiable return {"items": []}.\n\n'
-            f"Available products:\n{products_str}\n\n"
+            "You keep the shopping cart of a customer chatting with a shop on WhatsApp (in Spanish).\n"
+            "From the LATEST customer message, list the changes it makes to the cart.\n"
+            'Return JSON: {"operations": [{"op": "add"|"set"|"remove", "id": <catalogue id or null>, '
+            '"name": "<the product as the customer said it>", "quantity": <int>}], "cancel": <bool>}\n'
+            "Rules:\n"
+            '- "add": the customer wants a product or more of it; quantity = how many more (default 1).\n'
+            '- "set": the customer gives the final quantity of a product already in the cart '
+            '("mejor que sean 3", "solo 1"), or repeats one of them with a quantity.\n'
+            '- "remove": take a product out ("quita la gorra", "ya no quiero las medias").\n'
+            '- "cancel": true only when the customer drops the whole order ("cancela el pedido", "ya no quiero nada").\n'
+            "- id must be one of the catalogue ids. If the customer asks for something that is not in the catalogue "
+            "(another material, colour or product), use id null and the name they used. Never swap it for a different product.\n"
+            "- Questions about price, stock or delivery change nothing.\n"
+            "- If the latest message only agrees (si, dale, ok) to what the agent offered and the cart is empty, "
+            "add the products and quantities the agent offered.\n"
+            '- If nothing changes, return {"operations": [], "cancel": false}.\n\n'
+            f"Catalogue:\n{products_str}\n\nCurrent cart:\n{cart_str}\n\n"
             + (f"Recent conversation:\n{history_str}\n\n" if history_str else "")
-            + f'Latest user message: "{message}"\n\nReturn only valid JSON.'
+            + f'Latest customer message: "{context.message_body}"\n\nReturn only valid JSON.'
         )
-
         try:
             client = self._get_client()
-            model = settings.openrouter_model if settings.use_openrouter else settings.openai_model
+            model = model_for("item_extraction")
             response = await client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                extra_body={"max_completion_tokens": 200},
+                extra_body=request_options(context, "item_extraction", max_completion_tokens=300),
                 response_format={"type": "json_object"},
             )
+            llm_usage.record(context, "sales.item_extraction", model, response)
             result = json.loads(response.choices[0].message.content.strip())
-            return result.get("items", [])
+            operations = result.get("operations") if isinstance(result.get("operations"), list) else []
+            return {"operations": [op for op in operations if isinstance(op, dict)], "cancel": bool(result.get("cancel"))}
         except Exception as e:
-            self.log_error("purchase_item_extraction_failed", error=str(e))
-            return []
+            self.log_error("cart_operations_extraction_failed", error=str(e))
+            return {"operations": [], "cancel": False}
+
+    async def _fill_cart(self, context: PipelineContext, confirmed: bool) -> list:
+        """First products of a purchase. Returns the changes (including products not found or out of stock)."""
+        extracted = await self._extract_cart_operations(context)
+        items, changes = cart.apply([], extracted["operations"], self._cart_catalogue(context))
+        if not items and not changes and confirmed and len(context.relevant_products) == 1:
+            # Single product available and nothing named: that is the selection
+            items, changes = cart.apply([], [{"op": "add", "id": context.relevant_products[0].get("id")}],
+                                        context.relevant_products)
+        if items:
+            context.cart_contents["items"] = items
+        return changes
+
+    def _clear_cart(self, context: PipelineContext) -> None:
+        for key in ("items", "checkout_data", "invoice_requested", "payment_method", "payment_proof_submitted"):
+            context.cart_contents.pop(key, None)
+        context.checkout_data = {}
+        context.current_state = ConversationState.BROWSING
+
+    async def _handle_cart_edit(self, context: PipelineContext) -> bool:
+        """Apply what the message does to a cart in progress. False when it changes nothing."""
+        extracted = await self._extract_cart_operations(context)
+        currency = self._currency(context)
+        if extracted["cancel"]:
+            self._clear_cart(context)
+            context.action_type = "order_cancelled"
+            context.action_result = {"action": "order_cancelled"}
+            return True
+
+        items, changes = cart.apply(context.cart_contents.get("items") or [], extracted["operations"],
+                                    self._cart_catalogue(context))
+        if not changes:
+            return False
+
+        if not items:
+            self._clear_cart(context)
+            context.action_type = "cart_updated"
+            context.action_result = {"action": "cart_updated", "cart_changes": cart.describe_changes(changes),
+                                     "cart": cart.summary([], currency), "next": "cart_empty"}
+            return True
+
+        context.cart_contents["items"] = items
+        if context.current_state == ConversationState.CART_BUILDING and await self._is_purchase_confirmed(context):
+            # "Agrégame una gorra y confirmo": the change and the confirmation in one message
+            await self._handle_purchase_intent(context)
+            context.action_result = {**(context.action_result or {}), "cart_changes": cart.describe_changes(changes)}
+            return True
+
+        context.action_type = "cart_updated"
+        result = {"action": "cart_updated", "cart_changes": cart.describe_changes(changes),
+                  "cart": cart.summary(items, currency)}
+        if context.current_state == ConversationState.FULFILLMENT_COORD:
+            required = self._get_checkout_requirements(context)
+            result["next"] = "collect_checkout_data"
+            result["missing_fields"] = [f for f in required if not context.checkout_data.get(f)]
+        elif context.current_state == ConversationState.AWAITING_PAYMENT_METHOD:
+            result["next"] = "choose_payment_method"
+        else:
+            result["next"] = "confirm_order"
+        context.action_result = result
+        return True
 
     async def _start_new_purchase_cycle(self, context: PipelineContext) -> None:
         """Create a new lead and reset the cart for a fresh purchase cycle."""
@@ -646,12 +939,25 @@ class ActionExecutorStage(BasePipelineStage):
         required_fields = self._get_checkout_requirements(context)
 
         extracted = await self._extract_checkout_fields(
-            context.message_body, required_fields, context.checkout_data
+            context.message_body, required_fields, context.checkout_data, context=context
         )
         if extracted:
             context.checkout_data.update(extracted)
             context.cart_contents["checkout_data"] = context.checkout_data
             self.log_info("checkout_fields_extracted", fields=list(extracted.keys()))
+
+        # "Retiro en tienda" or "envío" decides whether an address is needed (Y-58)
+        choice = context.checkout_data.get(delivery.METHOD_FIELD)
+        if choice and not context.cart_contents.get("delivery_method"):
+            method = delivery.detect_method(choice)
+            if method:
+                context.cart_contents["delivery_method"] = method
+            else:
+                context.checkout_data.pop(delivery.METHOD_FIELD, None)
+        if context.cart_contents.get("delivery_method"):
+            context.checkout_data[delivery.METHOD_FIELD] = delivery.method_label(context.cart_contents["delivery_method"])
+            context.cart_contents["checkout_data"] = context.checkout_data
+        required_fields = self._get_checkout_requirements(context)
 
         missing_fields = [f for f in required_fields if not context.checkout_data.get(f)]
 
@@ -745,7 +1051,8 @@ class ActionExecutorStage(BasePipelineStage):
                 customer_name=customer_name,
                 products=products,
                 lead_info=context.lead_info,
-                conversation_summary=conversation_summary
+                conversation_summary=conversation_summary,
+                currency=self._currency(context),
             )
             
             self.log_info(
@@ -792,46 +1099,50 @@ class ActionExecutorStage(BasePipelineStage):
     
     async def _handle_handoff_request(self, context: PipelineContext):
         """
-        Handle handoff request - customer wants to talk to a human.
-        Notifies supervisor immediately.
+        The customer wants a person: pause the agent for this customer (Y-58) and tell the supervisor
+        on WhatsApp and Telegram, where «Reanudar agente» gives the conversation back to the agent.
         """
         context.action_type = "handoff_request"
-        
-        # Get supervisor number from agent config
-        supervisor_number = context.agent_config.get("integrations", {}).get("supervisor_number")
-        
+        settings_ = (context.agent_config or {}).get("conversation_settings") or {}
+        # The state arrives as the enum or as the stored text, depending on where the conversation came from
+        previous = getattr(context.current_state, "value", context.current_state) or "browsing"
+        handoff.pause(context.cart_contents, previous, settings_.get("pause_hours"))
+        context.current_state = ConversationState.PAUSED
+
+        customer_name = context.profile_name or (context.lead_info or {}).get("name")
+        summary = self._create_conversation_summary(context.conversation_history)
+        notified = False
+
+        supervisor_number = (context.agent_config.get("integrations") or {}).get("supervisor_number")
         if supervisor_number:
-            customer_name = context.profile_name or context.lead_info.get("name") if context.lead_info else None
-            conversation_context = self._create_conversation_summary(context.conversation_history)
-            
             try:
-                await NotificationService.notify_handoff_request(
+                notified = await NotificationService.notify_handoff_request(
                     supervisor_number=supervisor_number,
                     agent_phone=context.recipient_phone,
                     customer_phone=context.sender_phone,
                     customer_name=customer_name,
-                    reason="Cliente solicitó hablar con un humano",
-                    conversation_context=conversation_context
-                )
-                
-                self.log_info(
-                    "handoff_notification_sent",
-                    supervisor=supervisor_number,
-                    customer=context.sender_phone
-                )
-                
-                context.action_result = {"notified": True}
-                
+                    reason="Cliente solicitó hablar con una persona",
+                    conversation_context=summary,
+                ) or notified
             except Exception as e:
-                self.log_error(
-                    "failed_to_notify_handoff",
-                    error=str(e)
-                )
-                context.action_result = {"notified": False, "error": str(e)}
-        else:
-            self.log_error("no_supervisor_for_handoff")
-            context.action_result = {"notified": False, "error": "No supervisor configured"}
-    
+                self.log_error("failed_to_notify_handoff", error=str(e))
+
+        tg_config = (context.agent_config.get("integrations") or {}).get("telegram") or {}
+        if settings.telegram_bot_token and tg_config.get("enabled") and tg_config.get("supervisor_chat_id"):
+            from app.services import telegram_service
+            await telegram_service.send_handoff_notification(tg_config["supervisor_chat_id"], {
+                "phone": context.sender_phone,
+                "name": customer_name,
+                "message": context.message_body,
+                "summary": summary,
+                "conversation_id": str(context.conversation_id or ""),
+            })
+            notified = True
+
+        if not notified:
+            self.log_error("no_supervisor_for_handoff", agent_instance_id=context.agent_instance_id)
+        context.action_result = {"action": "handoff", "notified": notified}
+
     async def _handle_payment_proof_received(self, context: PipelineContext):
         """
         Handle payment proof submission from customer.
@@ -855,15 +1166,22 @@ class ActionExecutorStage(BasePipelineStage):
         try:
             import mimetypes
             from datetime import timezone
-            from app.services.media_downloader import download_twilio_media
+            from app.services.media_downloader import download_whatsapp_media
             from app.services import r2_storage
             from app.services import telegram_service
             from app.core.config import settings
+            from app.services.whatsapp_connections import get_whatsapp_connection_for_phone
 
             proof_twilio_url = context.media_urls[0]
+            connection = await get_whatsapp_connection_for_phone(context.recipient_phone)
+            provider = (connection or {}).get("provider") or "evolution"
 
-            # 1. Download from Twilio
-            file_bytes, content_type = await download_twilio_media(proof_twilio_url)
+            # 1. Download from the configured WhatsApp provider
+            file_bytes, content_type = await download_whatsapp_media(
+                proof_twilio_url,
+                provider=provider,
+                agent_phone=context.recipient_phone,
+            )
 
             # 2. Upload to R2
             ext = (mimetypes.guess_extension(content_type) or ".bin").lstrip(".")
@@ -897,6 +1215,7 @@ class ActionExecutorStage(BasePipelineStage):
                     products=proof_products,
                     proof_presigned_url=presigned_url,
                     lead_info=context.lead_info,
+                    currency=self._currency(context),
                 )
 
             # 5. Telegram native upload — bytes go directly, no expiry problem.
@@ -919,8 +1238,10 @@ class ActionExecutorStage(BasePipelineStage):
                         }
                         for p in products
                     ],
-                    "total_price": f"${total:.2f}",
+                    "total_price": money(total, self._currency(context)),
+                    "currency": self._currency(context),
                     "checkout_data": context.checkout_data,
+                    "invoice_requested": bool(context.cart_contents.get("invoice_requested")),
                     "conversation_id": str(context.conversation_id or ""),
                 }
                 await telegram_service.send_payment_approval_request(
@@ -1042,8 +1363,10 @@ class ActionExecutorStage(BasePipelineStage):
                     }
                     for p in products
                 ],
-                "total_price": f"${total:.2f}",
+                "total_price": money(total, self._currency(context)),
+                "currency": self._currency(context),
                 "checkout_data": context.checkout_data,
+                "invoice_requested": bool(context.cart_contents.get("invoice_requested")),
                 "conversation_id": str(context.conversation_id or ""),
             }
             await telegram_service.send_purchase_intent_notification(

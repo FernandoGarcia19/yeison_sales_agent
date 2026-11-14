@@ -51,7 +51,7 @@ async def factory(monkeypatch):
     await engine.dispose()
 
 
-async def _order(factory, payment_method="qr", with_lead=True, items=None, currency="BOB"):
+async def _order(factory, payment_method="qr", with_lead=True, items=None, currency="BOB", cart_extra=None):
     """Insert tenant, agent, conversation waiting for approval, and its lead."""
     suffix = uuid.uuid4().hex[:8]
     if items is None:
@@ -72,7 +72,7 @@ async def _order(factory, payment_method="qr", with_lead=True, items=None, curre
             "last_update, cart_contents, current_state) values (:a, '+59170000001', '[]', true, now(), now(), "
             "cast(:cart as jsonb), 'awaiting_receipt') returning id"),
             {"a": agent_id, "cart": json.dumps({"items": items, "payment_method": payment_method,
-                                                "payment_proof_submitted": True})})).scalar_one()
+                                                "payment_proof_submitted": True, **(cart_extra or {})})})).scalar_one()
         lead_id = None
         if with_lead:
             lead_id = (await db.execute(text(
@@ -140,3 +140,19 @@ async def test_rejection_records_nothing(factory):
     order = await _order(factory)
     await tw.process_telegram_callback(f"reject_sale_{order['conversation_id']}", chat_id=1, message_id=1)
     assert await _sales(factory, order["conversation_id"]) == []
+
+
+async def test_a_sale_keeps_the_invoice_the_customer_asked_for(factory):
+    order = await _order(factory, cart_extra={"invoice_requested": True, "checkout_data": {
+        "Nombre completo": "Carla M.", "NIT o CI para la factura": "4567890", "Razón social para la factura": "Carla SRL"}})
+    await tw.process_telegram_callback(f"approve_sale_{order['conversation_id']}", chat_id=1, message_id=1)
+    [sale] = await _sales(factory, order["conversation_id"])
+    assert sale.invoice_request["tax_id"] == "4567890" and sale.invoice_request["name"] == "Carla SRL"
+    assert sale.invoice_request["requested_at"]
+
+
+async def test_a_sale_without_the_request_has_none(factory):
+    order = await _order(factory, cart_extra={"checkout_data": {"Nombre completo": "Carla M.", "NIT": "99"}})
+    await tw.process_telegram_callback(f"approve_sale_{order['conversation_id']}", chat_id=1, message_id=1)
+    [sale] = await _sales(factory, order["conversation_id"])
+    assert sale.invoice_request is None

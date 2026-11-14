@@ -1,0 +1,5 @@
+# Tests and lint (CI, Y-27); the image only installs requirements.txt
+-r requirements.txt
+pytest==8.3.4
+pytest-asyncio==0.24.0
+ruff==0.14.1

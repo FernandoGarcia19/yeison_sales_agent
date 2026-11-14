@@ -1,0 +1,10 @@
+name = "Retiro en tienda: solo pide el nombre"
+agent = "moda"
+
+[[turns]]
+say = "Quiero 1 bolso de aguayo, paso a recogerlo a la tienda"
+expect = { state = "fulfillment_coord", cart = { "Bolso de aguayo" = 1 } }
+
+[[turns]]
+say = "Ana Rojas"
+expect = { state = "awaiting_receipt", collected = ["Nombre completo", "Entrega (retiro en tienda o envío)"], supervisor = true }

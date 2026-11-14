@@ -1,0 +1,10 @@
+name = "Precios en la moneda del negocio y producto después del quinto"
+agent = "moda"
+
+[[turns]]
+say = "¿A cuánto la chompa de alpaca?"
+expect = { state = "browsing", says = ["Bs 320"] }
+
+[[turns]]
+say = "¿Y las medias?"
+expect = { state = "browsing", says = ["Bs 35"] }

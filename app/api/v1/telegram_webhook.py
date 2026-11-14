@@ -1,3 +1,7 @@
+import base64
+import hmac
+from typing import Optional
+
 from fastapi import APIRouter, Request, BackgroundTasks, HTTPException
 import structlog
 from app.core.database import get_session_factory
@@ -6,6 +10,7 @@ from app.models import SalesConversation, AgentInstance
 from app.schemas.pipeline import ConversationState
 from app.integrations.whatsapp.client import send_whatsapp_message
 import httpx
+from app.core import simulation
 from app.core.config import settings
 from app.services.sale_recorder import record_sale
 
@@ -14,6 +19,7 @@ _TELEGRAM_CAPTION_LIMIT = 1024
 # Member links from the panel (Y-32) look like "m_<hex>"; supervisor links are "{agent_id}_<hex>"
 _MEMBER_TOKEN_PREFIX = "m_"
 _ROLE_NAMES = {"owner": "dueño", "manager": "encargado", "accountant": "contador", "employee": "empleado"}
+_DIRECTOR_CALLBACK_PREFIX = "dir_"
 
 
 def _build_caption(status_header: str, original_caption: str) -> str:
@@ -35,10 +41,17 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     Webhook to receive updates from Telegram:
     - callback_query: approve/reject inline button presses
     - message with /start <token>: Telegram bot connection flow
+    - any other private message, photo included, and dir_* buttons: Yeison, the Director (panel_backend)
     """
-    if settings.telegram_webhook_secret:
+    # Y-96: without the secret anyone could post a fake update (approve a payment, talk to the Director as
+    # an owner). No secret configured = refused, except in debug (local development).
+    if not settings.telegram_webhook_secret:
+        if not settings.debug:
+            logger.warning("telegram_webhook_secret_missing")
+            raise HTTPException(status_code=503, detail="Telegram webhook is not configured")
+    else:
         incoming_secret = request.headers.get(_TELEGRAM_SECRET_HEADER, "")
-        if incoming_secret != settings.telegram_webhook_secret:
+        if not hmac.compare_digest(incoming_secret.encode(), settings.telegram_webhook_secret.encode()):
             raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     try:
@@ -58,13 +71,24 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         # Must answer immediately — this dismisses the loading spinner on the button.
         await _answer_callback_query(callback_id)
 
-        if callback_data.startswith("approve_sale_") or callback_data.startswith("reject_sale_"):
+        if callback_data.startswith("resume_agent_") and chat_id:
+            background_tasks.add_task(_resume_agent, callback_data, str(chat_id))
+        elif callback_data.startswith("approve_sale_") or callback_data.startswith("reject_sale_"):
             background_tasks.add_task(
                 process_telegram_callback,
                 callback_data=callback_data,
                 chat_id=chat_id,
                 message_id=message_id,
                 original_caption=original_caption,
+            )
+        elif callback_data.startswith(_DIRECTOR_CALLBACK_PREFIX) and chat_id:
+            background_tasks.add_task(
+                _forward_director_callback,
+                telegram_user_id=(callback_query.get("from") or {}).get("id"),
+                chat_id=str(chat_id),
+                message_id=message_id,
+                original_text=message.get("text", ""),
+                data=callback_data,
             )
 
     elif "message" in update_data:
@@ -73,7 +97,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         chat_id = message.get("chat", {}).get("id")
 
         # Deep-link connect: Telegram sends "/start {token}" as the message text.
-        # Split on the first space — if no token present (plain /start), ignore.
+        # Split on the first space; a plain /start (no token) gets the Director's welcome.
         if text.startswith("/start") and chat_id:
             parts = text.split(" ", 1)
             token = parts[1].strip() if len(parts) > 1 else ""
@@ -89,6 +113,20 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
                 )
             elif token:
                 background_tasks.add_task(_process_connect_start, token=token, chat_id=str(chat_id))
+            elif _is_private(message):
+                background_tasks.add_task(_forward_to_director, telegram_user_id=(message.get("from") or {}).get("id"),
+                                          chat_id=str(chat_id), text=text)
+        elif text and chat_id and _is_private(message):
+            # Everything else a person writes to the bot goes to Yeison, the Director (Y-33).
+            # Group chats (the supervisor's) only use buttons, so they are not answered.
+            background_tasks.add_task(_forward_to_director, telegram_user_id=(message.get("from") or {}).get("id"),
+                                      chat_id=str(chat_id), text=text)
+        elif chat_id and _is_private(message) and _image_file(message):
+            # A photo of an invoice: the Director reads it and proposes the expense (Y-39)
+            file_id, mime_type = _image_file(message)
+            background_tasks.add_task(_forward_photo_to_director,
+                                      telegram_user_id=(message.get("from") or {}).get("id"), chat_id=str(chat_id),
+                                      file_id=file_id, mime_type=mime_type, caption=message.get("caption") or "")
 
     return {"status": "ok"}
 
@@ -177,15 +215,155 @@ async def _process_member_connect(token: str, chat_id: str, telegram_user_id, us
         await _send_telegram_message(chat_id, "⚠️ Error interno al vincular. Intenta de nuevo.")
 
 
-async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> None:
-    """Ask panel_backend to record the SALE_EXIT movements of a sale. Failures are logged, never raised."""
+def _is_private(message: dict) -> bool:
+    return (message.get("chat") or {}).get("type") == "private"
+
+
+async def _ask_director(path: str, body: dict) -> Optional[dict]:
+    """POST to the panel's Director; None (and a log line) when it cannot answer."""
+    if not settings.backend_api_url or not settings.backend_api_key:
+        logger.error("director_missing_backend_config")
+        return None
+    url = f"{settings.backend_api_url.rstrip('/')}/internal/director/{path}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=body, headers={"x-internal-key": settings.backend_api_key})
+        if response.status_code == 200:
+            return response.json()
+        logger.error("director_unexpected_status", path=path, status=response.status_code, body=response.text[:200])
+    except Exception as e:
+        logger.error("director_request_failed", path=path, error=str(e))
+    return None
+
+
+async def _send_director_document(chat_id: str, answer: Optional[dict]) -> None:
+    """The PDF the Director attached to its answer (an HR document, Y-81), after the text."""
+    document = (answer or {}).get("document")
+    if not document:
+        return
+    from app.services.telegram_service import send_document
+
+    try:
+        content = base64.b64decode(document.get("content_base64") or "", validate=True)
+    except (ValueError, TypeError):
+        content = b""
+    if not content or not await send_document(chat_id, content, document.get("filename") or "documento.pdf",
+                                              document.get("caption") or ""):
+        await _send_telegram_message(chat_id, "⚠️ No pude enviarte el PDF. Descárgalo del panel, en RRHH → Documentos.")
+
+
+def _inline_keyboard(buttons: list) -> Optional[dict]:
+    if not buttons:
+        return None
+    return {"inline_keyboard": [[{"text": b["text"], "callback_data": b["callback_data"]} for b in row]
+                                for row in buttons]}
+
+
+async def _forward_to_director(telegram_user_id, chat_id: str, text: str) -> None:
+    if not telegram_user_id:
+        return
+    answer = await _ask_director("message", {"telegram_user_id": telegram_user_id, "chat_id": chat_id, "text": text})
+    if answer is None:
+        await _send_telegram_message(chat_id, "⚠️ No pude responder ahora. Intenta de nuevo en un momento.")
+        return
+    await _send_telegram_message(chat_id, answer["text"], reply_markup=_inline_keyboard(answer.get("buttons")))
+    await _send_director_document(chat_id, answer)
+
+
+_MAX_PHOTO_BYTES = 8 * 1024 * 1024
+
+
+def _image_file(message: dict) -> Optional[tuple]:
+    """(file_id, mime type) of a photo, or of an image sent as a file; None otherwise."""
+    photos = message.get("photo") or []
+    if photos:
+        return photos[-1]["file_id"], "image/jpeg"  # Telegram lists sizes from small to large
+    document = message.get("document") or {}
+    if (document.get("mime_type") or "") in ("image/jpeg", "image/png", "image/webp"):
+        return document["file_id"], document["mime_type"]
+    return None
+
+
+async def _download_telegram_file(file_id: str) -> Optional[bytes]:
+    if not settings.telegram_bot_token:
+        return None
+    base = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            info = (await client.get(f"{base}/getFile", params={"file_id": file_id})).json()
+            path = (info.get("result") or {}).get("file_path")
+            if not path or (info["result"].get("file_size") or 0) > _MAX_PHOTO_BYTES:
+                return None
+            response = await client.get(f"https://api.telegram.org/file/bot{settings.telegram_bot_token}/{path}")
+        return response.content if response.status_code == 200 else None
+    except Exception as e:
+        logger.error("telegram_file_download_failed", error=str(e))
+        return None
+
+
+async def _forward_photo_to_director(telegram_user_id, chat_id: str, file_id: str, mime_type: str,
+                                     caption: str) -> None:
+    if not telegram_user_id:
+        return
+    image = await _download_telegram_file(file_id)
+    if image is None:
+        await _send_telegram_message(chat_id, "⚠️ No pude descargar la foto. Envíala de nuevo, por favor.")
+        return
+    await _send_telegram_message(chat_id, "🔎 Leyendo la factura…")
+    answer = await _ask_director("photo", {"telegram_user_id": telegram_user_id, "chat_id": chat_id,
+                                           "image_base64": base64.b64encode(image).decode(),
+                                           "mime_type": mime_type, "caption": caption[:1024]})
+    if answer is None:
+        await _send_telegram_message(chat_id, "⚠️ No pude leer la factura ahora. Intenta de nuevo en un momento.")
+        return
+    await _send_telegram_message(chat_id, answer["text"], reply_markup=_inline_keyboard(answer.get("buttons")))
+    await _send_director_document(chat_id, answer)
+
+
+async def _forward_director_callback(telegram_user_id, chat_id: str, message_id: int, original_text: str,
+                                     data: str) -> None:
+    """Confirmar / Cancelar of a Director action: apply it and replace the buttons with the result."""
+    if not telegram_user_id:
+        return
+    answer = await _ask_director("callback", {"telegram_user_id": telegram_user_id, "chat_id": chat_id, "data": data})
+    result = answer["text"] if answer else "⚠️ No pude procesar el botón. Intenta de nuevo."
+    combined = f"{original_text}\n\n{result}".strip()
+    if not message_id or not await _replace_text_message(chat_id, message_id, combined):
+        await _send_telegram_message(chat_id, result)
+    await _send_director_document(chat_id, answer)
+
+
+async def _replace_text_message(chat_id: str, message_id: int, text: str) -> bool:
+    """Edit a plain-text bot message and drop its buttons. False if Telegram refused."""
+    if not settings.telegram_bot_token:
+        return False
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/editMessageText"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": text[:4096],
+                                                    "reply_markup": {"inline_keyboard": []}})
+        return response.status_code == 200
+    except Exception as e:
+        logger.error("telegram_edit_text_failed", error=str(e))
+        return False
+
+
+async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> bool:
+    """
+    Ask panel_backend to record the SALE_EXIT movements of a sale. Failures are logged, never raised.
+    Returns whether it is done (the panel is idempotent per sale, so a retry never discounts twice).
+    """
+    if simulation.current():
+        simulation.capture("inventory", items=[{"name": i.get("name"), "quantity": i.get("quantity")}
+                                               for i in sale_items or []])
+        return True
     if not settings.backend_api_url or not settings.backend_api_key:
         logger.error("stock_exit_missing_backend_config", sale_id=sale_id)
-        return
+        return False
     items = [{"product_id": i.get("product_id"), "quantity": i.get("quantity")}
              for i in sale_items or [] if i.get("product_id")]
     if not items:
-        return
+        return True
     url = f"{settings.backend_api_url.rstrip('/')}/internal/inventory/sale-exit"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -193,19 +371,27 @@ async def _discount_stock(tenant_id: int, sale_id: int, sale_items: list) -> Non
                                          headers={"x-internal-key": settings.backend_api_key})
         if response.status_code != 200:
             logger.error("stock_exit_failed", sale_id=sale_id, status=response.status_code, body=response.text[:200])
-        else:
-            logger.info("stock_exit_recorded", sale_id=sale_id, movements=len(response.json().get("movements", [])))
+            return False
+        logger.info("stock_exit_recorded", sale_id=sale_id, movements=len(response.json().get("movements", [])))
+        return True
     except Exception as e:
         logger.error("stock_exit_request_failed", sale_id=sale_id, error=str(e))
+        return False
 
 
-async def _send_telegram_message(chat_id: str, text: str) -> None:
+async def _send_telegram_message(chat_id: str, text: str, reply_markup: Optional[dict] = None) -> None:
+    if simulation.current():
+        simulation.capture("telegram", text=text)
+        return
     if not settings.telegram_bot_token:
         return
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(url, json={"chat_id": chat_id, "text": text})
+            await client.post(url, json=payload)
     except Exception as e:
         logger.error("telegram_send_message_failed", error=str(e))
 
@@ -218,6 +404,20 @@ async def _answer_callback_query(callback_id: str, text: str = "") -> None:
             await client.post(url, json={"callback_query_id": callback_id, "text": text})
     except Exception as e:
         logger.error("telegram_answer_callback_failed", error=str(e))
+
+
+async def _resume_agent(callback_data: str, chat_id: str) -> None:
+    """«Reanudar agente»: the agent answers this customer again (Y-58)."""
+    from app.services import handoff
+
+    try:
+        conversation_id = int(callback_data.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return
+    phone = await handoff.resume_conversation(conversation_id)
+    text = (f"▶️ El agente volvió a atender a {phone}." if phone
+            else "Esa conversación ya no estaba en pausa.")
+    await _send_telegram_message(chat_id, text)
 
 
 async def process_telegram_callback(callback_data: str, chat_id: int, message_id: int, original_caption: str = ""):
@@ -319,6 +519,8 @@ async def process_telegram_callback(callback_data: str, chat_id: int, message_id
 
 
 async def edit_telegram_message_text(chat_id: int, message_id: int, new_text: str):
+    if simulation.current():
+        return
     if not settings.telegram_bot_token:
         return
 

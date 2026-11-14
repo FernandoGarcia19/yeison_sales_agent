@@ -1,4 +1,5 @@
 import base64
+import hmac
 from typing import Optional
 
 from fastapi import APIRouter, Request, BackgroundTasks, HTTPException
@@ -42,9 +43,15 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     - message with /start <token>: Telegram bot connection flow
     - any other private message, photo included, and dir_* buttons: Yeison, the Director (panel_backend)
     """
-    if settings.telegram_webhook_secret:
+    # Y-96: without the secret anyone could post a fake update (approve a payment, talk to the Director as
+    # an owner). No secret configured = refused, except in debug (local development).
+    if not settings.telegram_webhook_secret:
+        if not settings.debug:
+            logger.warning("telegram_webhook_secret_missing")
+            raise HTTPException(status_code=503, detail="Telegram webhook is not configured")
+    else:
         incoming_secret = request.headers.get(_TELEGRAM_SECRET_HEADER, "")
-        if incoming_secret != settings.telegram_webhook_secret:
+        if not hmac.compare_digest(incoming_secret.encode(), settings.telegram_webhook_secret.encode()):
             raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     try:

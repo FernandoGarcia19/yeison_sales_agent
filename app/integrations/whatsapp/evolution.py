@@ -77,6 +77,16 @@ def event_name(payload: dict[str, Any]) -> str:
     return str(payload.get("event") or "").strip().lower().replace("_", ".")
 
 
+def connection_update(payload: dict[str, Any]) -> Optional[tuple[str, str]]:
+    """(instance, state) of a connection.update webhook; state is open, connecting or close."""
+    if event_name(payload) != "connection.update":
+        return None
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    instance = _extract_instance_name(payload) or str(data.get("instance") or "")
+    state = str(data.get("state") or "").strip().lower()
+    return (instance, state) if instance and state else None
+
+
 def skip_reason(payload: dict[str, Any]) -> Optional[str]:
     """Why an Evolution webhook is not a customer message to answer (None when it is)."""
     event = event_name(payload)

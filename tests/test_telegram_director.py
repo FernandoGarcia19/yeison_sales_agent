@@ -43,7 +43,7 @@ def captured(monkeypatch):
     monkeypatch.setattr(tw.httpx, "AsyncClient", client_factory)
     monkeypatch.setattr(settings, "backend_api_url", "http://panel/api/v1/")
     monkeypatch.setattr(settings, "backend_api_key", "internal-key")
-    monkeypatch.setattr(settings, "telegram_webhook_secret", None, raising=False)
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "tg-secret", raising=False)
     return calls
 
 
@@ -51,7 +51,7 @@ async def _post(update):
     app = FastAPI()
     app.include_router(tw.router)
     async with _RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        return await client.post("/webhooks/telegram", json=update)
+        return await client.post("/webhooks/telegram", json=update, headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"})
 
 
 def _message(text, chat_type="private", user_id=555):

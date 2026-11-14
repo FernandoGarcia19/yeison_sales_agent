@@ -67,8 +67,8 @@ class Settings(BaseSettings):
     
     # Telegram settings
     telegram_bot_token: Optional[str] = None
-    # telegram_webhook_secret: optional — when set, inbound callbacks must carry
-    # X-Telegram-Bot-Api-Secret-Token matching this value.
+    # telegram_webhook_secret: inbound updates must carry X-Telegram-Bot-Api-Secret-Token matching this
+    # value; without it the webhook refuses everything except in debug (Y-96).
     telegram_webhook_secret: Optional[str] = None
 
     # Token encryption — must match the key used by yeison_panel_backend

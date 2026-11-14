@@ -7,6 +7,7 @@ Uploads use aioboto3 for async compatibility.
 import io
 import aioboto3
 import boto3
+from app.core import simulation
 from app.core.config import settings
 
 
@@ -32,6 +33,8 @@ def get_presigned_url(key: str, expires_in: int = 900) -> str:
 
 async def upload_bytes(key: str, data: bytes, content_type: str) -> str:
     """Upload raw bytes to R2 and return the object key."""
+    if simulation.current():
+        return key
     session = aioboto3.Session()
     async with session.client(
         "s3",

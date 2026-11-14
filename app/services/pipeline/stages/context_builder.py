@@ -6,10 +6,12 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.schemas.pipeline import PipelineContext
+from app.schemas.pipeline import ConversationState, PipelineContext
 from app.services.pipeline.base import BasePipelineStage
-from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant
+from app.services import catalog_search, delivery, purchase_confirmation
+from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant, Tenant
 from app.core.database import get_session_factory
+from app.core.money import normalize as normalize_currency
 from app.core.redis_client import (
     cache_get,
     cache_set,
@@ -109,22 +111,27 @@ class ContextBuilderStage(BasePipelineStage):
                     combined_length=len(context.message_body)
                 )
             
-            # Load relevant inventory based on intent (with tenant-scoped caching)
-            if context.intent in ["product_inquiry", "pricing_question", "availability_check", "purchase_intent"]:
-                inventory_cache_key = build_inventory_cache_key(context.tenant_id)
-                cached_inventory = await cache_get(inventory_cache_key)
-                
-                if cached_inventory:
-                    context.relevant_products = cached_inventory[:5]  # Limit to 5
+            # Load relevant inventory based on intent (with tenant-scoped caching). A bare "sí"
+            # to the agent's offer is classified as unknown but closes a purchase (action_executor)
+            # A cart in progress may change with any message ("quita la gorra"), so it gets the catalogue too (Y-56)
+            if context.intent in ["product_inquiry", "pricing_question", "availability_check", "purchase_intent"] or (
+                purchase_confirmation.confirms_offer(context.message_body, context.conversation_history)
+            ) or context.current_state in (
+                ConversationState.CART_BUILDING, ConversationState.FULFILLMENT_COORD, ConversationState.AWAITING_PAYMENT_METHOD
+            ):
+                # The whole catalogue is cached (the old key held only 5 products)
+                inventory_cache_key = build_inventory_cache_key(context.tenant_id) + ":catalogue"
+                catalogue = await cache_get(inventory_cache_key)
+
+                if catalogue is not None:
                     self.log_info("inventory_from_cache", tenant_id=context.tenant_id)
                 else:
-                    context.relevant_products = await self._load_relevant_products(
-                        db,
-                        context.tenant_id,
-                        context.message_body
-                    )
+                    catalogue = await self._load_catalogue(db, context.tenant_id)
                     # Cache inventory for 10 minutes
-                    await cache_set(inventory_cache_key, context.relevant_products, ttl=600)
+                    await cache_set(inventory_cache_key, catalogue, ttl=600)
+                context.relevant_products = catalog_search.rank(
+                    catalogue, context.message_body, context.conversation_history
+                )
             
             # Lead info already populated by IdentificationStage — skip re-query
             if not context.lead_info:
@@ -134,61 +141,12 @@ class ContextBuilderStage(BasePipelineStage):
                     context.sender_phone
                 )
         
-        # Add specific instructions based on ConversationState
-        from app.schemas.pipeline import ConversationState
-        state_instructions = ""
-        current_state = context.current_state
-        if current_state == ConversationState.BROWSING:
-            state_instructions = "The user is currently browsing. Answer their questions about our products."
-        elif current_state == ConversationState.CART_BUILDING:
-            state_instructions = f"The user is adding items to their cart. Current cart: {context.cart_contents}. Ask if they need anything else before checkout."
-        elif current_state == ConversationState.FULFILLMENT_COORD:
-            missing = [
-                f for f in (context.agent_config or {}).get("checkout_requirements", ["Nombre completo", "Dirección de entrega", "NIT"])
-                if not context.checkout_data.get(f)
-            ]
-            collected_str = ", ".join(f"{k}: {v}" for k, v in context.checkout_data.items()) if context.checkout_data else "ninguno aún"
-            missing_str = ", ".join(missing) if missing else "todos recopilados"
-            state_instructions = (
-                f"El usuario está listo para finalizar su compra. "
-                f"Datos ya recopilados: {collected_str}. "
-                f"Datos que aún faltan: {missing_str}. "
-                f"Pide amablemente la información faltante. NO envíes el QR ni menciones el pago "
-                f"hasta que el usuario haya proporcionado todos los datos requeridos."
-            )
-        elif current_state == ConversationState.AWAITING_PAYMENT_METHOD:
-            state_instructions = (
-                "El usuario ya confirmó su compra y proporcionó todos los datos necesarios. "
-                "Ahora debe elegir su método de pago. Tenemos disponibles: pago con QR (billetera digital) "
-                "y pago físico/efectivo. Pregunta amablemente cuál prefiere. "
-                "No cambies de tema hasta recibir su respuesta."
-            )
-        elif current_state == ConversationState.AWAITING_RECEIPT:
-            payment_method = context.cart_contents.get("payment_method", "qr")
-            proof_submitted = context.cart_contents.get("payment_proof_submitted", False)
-            if payment_method == "physical":
-                state_instructions = (
-                    "El usuario eligió pago físico/efectivo. Su pedido fue enviado al supervisor para aprobación. "
-                    "Informa amablemente que su pedido está siendo revisado y que el equipo se pondrá en contacto "
-                    "para coordinar el pago. NO pidas ningún comprobante."
-                )
-            elif proof_submitted:
-                state_instructions = (
-                    "El usuario ya envió su comprobante de pago QR y está esperando la aprobación del supervisor. "
-                    "Informa amablemente que estamos revisando su pago y que recibirán una confirmación pronto. "
-                    "NO pidas el comprobante de nuevo."
-                )
-            else:
-                state_instructions = (
-                    "Estamos esperando que el usuario envíe una foto o captura de su comprobante de pago QR. "
-                    "No respondas preguntas no relacionadas. Recuérdales amablemente que deben enviar la imagen del comprobante."
-                )
-            
-        if state_instructions:
-            if not context.agent_config.get("operations_info"):
-                context.agent_config["operations_info"] = {}
-            existing_process = context.agent_config["operations_info"].get("sales_process", "")
-            context.agent_config["operations_info"]["sales_process"] = f"{existing_process}\n\nINSTRUCCIONES DE ESTADO ACTUAL:\n{state_instructions}".strip()
+        # State-based instructions for the system prompt used to be built here, from
+        # context.current_state/checkout_data as loaded at the *start* of the turn - but
+        # action_executor (which runs after this stage) is what actually extracts new checkout
+        # data and may move the state on, so that text could describe a state the turn had
+        # already moved past (e.g. still asking for a field action_executor just collected).
+        # response_generator now builds it from the post-action context instead (_state_instructions).
 
         self.log_info(
             "context_built",
@@ -253,7 +211,7 @@ class ContextBuilderStage(BasePipelineStage):
             self.log_info(
                 "tenant_config_not_found",
                 tenant_id=agent.tenant_id,
-                message="No active tenant configuration found - using defaults"
+                note="No active tenant configuration found - using defaults"
             )
         
         # Build unified configuration
@@ -261,7 +219,20 @@ class ContextBuilderStage(BasePipelineStage):
             agent_config=agent.configuration if agent.configuration else {},
             tenant_config=tenant_config
         )
-        
+
+        # How the business delivers (Y-58): the agent may only state this
+        business = (tenant_config.business or {}) if tenant_config else {}
+        config["delivery"] = delivery.from_operations(
+            tenant_config.operations if tenant_config else None,
+            business_address=business.get("address") or business.get("location"),
+        )
+
+        # Prices are written in the business's currency (Bs for a business without one set)
+        base_currency = (await db.execute(
+            select(Tenant.base_currency).where(Tenant.id == agent.tenant_id)
+        )).scalar_one_or_none()
+        config.setdefault("tenant_info", {})["currency"] = normalize_currency(base_currency)
+
         return config
     
     def _merge_configurations(
@@ -300,6 +271,10 @@ class ContextBuilderStage(BasePipelineStage):
                     tenant_info["location"] = tenant_config.business["location"]
                 if "website" in tenant_config.business:
                     tenant_info["website"] = tenant_config.business["website"]
+                # Rules of the business type, written by the panel from the owner's answers (Etapa 3)
+                rules = tenant_config.business.get("industry_rules")
+                if isinstance(rules, list) and rules:
+                    tenant_info["industry_rules"] = [str(rule).strip() for rule in rules if str(rule).strip()]
                 if "year_founded" in tenant_config.business:
                     tenant_info["year_founded"] = tenant_config.business["year_founded"]
                 
@@ -447,6 +422,11 @@ class ContextBuilderStage(BasePipelineStage):
         for key, value in override.items():
             if key in base and isinstance(base[key], dict) and isinstance(value, dict):
                 self._deep_merge(base[key], value)
+            elif value is None and base.get(key) is not None:
+                # Optional fields (e.g. personality.formality_level) default to None in the
+                # DB/schema meaning "not set", not "explicitly cleared" - don't let that null
+                # clobber a real default (it was literally landing in the LLM prompt as "None").
+                continue
             else:
                 base[key] = value
     
@@ -471,25 +451,19 @@ class ContextBuilderStage(BasePipelineStage):
         # Return last N messages
         return conversation.get_conversation_history(limit)
     
-    async def _load_relevant_products(
+    async def _load_catalogue(
         self,
         db: AsyncSession,
         tenant_id: int,
-        message_body: str
     ) -> list[dict]:
-        """
-        Load products relevant to the user's query.
-        
-        In production, use semantic search or vector embeddings.
-        For now, just return active products.
-        """
-        
+        """The business's active products in stock; catalog_search picks the ones of each turn."""
+
         from sqlalchemy import or_
         stmt = select(InventoryTenant).where(
             InventoryTenant.tenant_id == tenant_id,
             InventoryTenant.active == True,
             or_(InventoryTenant.quantity > 0, InventoryTenant.quantity.is_(None))
-        ).limit(5)
+        ).order_by(InventoryTenant.id).limit(catalog_search.MAX_CATALOGUE)
         
         result = await db.execute(stmt)
         products = result.scalars().all()

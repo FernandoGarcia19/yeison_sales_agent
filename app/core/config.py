@@ -1,6 +1,5 @@
 from pydantic_settings import BaseSettings
 from typing import Optional
-import os
 
 class Settings(BaseSettings):
     # App settings
@@ -8,12 +7,22 @@ class Settings(BaseSettings):
     version: str = "1.0.0"
     debug: bool = False
     
-    # WhatsApp/Twilio settings
+    # WhatsApp provider settings
+    whatsapp_provider_default: str = "evolution"
     whatsapp_verify_token: Optional[str] = None
     whatsapp_access_token: Optional[str] = None
+
+    # Legacy Twilio settings (deprecated; keep for rollback only)
     twilio_account_sid: Optional[str] = None
     twilio_auth_token: Optional[str] = None
     twilio_phone_number: Optional[str] = None
+
+    # Evolution API settings
+    evolution_api_url: Optional[str] = None
+    evolution_api_key: Optional[str] = None
+    evolution_webhook_secret: Optional[str] = None
+    evolution_send_text_path: str = "/message/sendText/{instance}"
+    evolution_send_media_path: str = "/message/sendMedia/{instance}"
     
     # Database settings
     database_url: Optional[str] = None
@@ -27,13 +36,22 @@ class Settings(BaseSettings):
     
     # Message batching settings
     batch_enabled: bool = True  # Enable/disable message batching
-    batch_window_seconds: int = 3  # Wait time to collect multiple messages
+    batch_window_seconds: float = 3  # Silence after the last message before answering
+    batch_max_wait_seconds: float = 10  # Longest wait from the first message of a batch
     batch_max_messages: int = 5  # Maximum messages per batch (fire early if reached)
+    batch_run_timeout_seconds: int = 180  # How long a batch waits for the previous one of the same customer
     
     # AI/LLM settings
     openai_api_key: Optional[str] = None
     # gpt-4-turbo costs ~USD 10/30 per 1M tokens (in/out); gpt-5.4-mini ~USD 0.75/4.50
     openai_model: str = "gpt-5.4-mini"
+    # Small model for the internal steps (classification, decision, extraction), e.g. gpt-5.4-nano;
+    # empty = openai_model for everything. The reply the customer reads always uses openai_model (Y-16).
+    openai_small_model: Optional[str] = None
+    # prompt_cache_key per agent and step, so OpenAI reuses the cached prompt prefixes (Y-16)
+    prompt_cache_enabled: bool = True
+    # USD per 1M tokens for models not in app/services/llm_usage.KNOWN_PRICES, as JSON (Y-15)
+    llm_prices: Optional[str] = None
     openai_temperature: float = 0.7
     openai_max_tokens: int = 500
     
@@ -49,8 +67,8 @@ class Settings(BaseSettings):
     
     # Telegram settings
     telegram_bot_token: Optional[str] = None
-    # telegram_webhook_secret: optional — when set, inbound callbacks must carry
-    # X-Telegram-Bot-Api-Secret-Token matching this value.
+    # telegram_webhook_secret: inbound updates must carry X-Telegram-Bot-Api-Secret-Token matching this
+    # value; without it the webhook refuses everything except in debug (Y-96).
     telegram_webhook_secret: Optional[str] = None
 
     # Token encryption — must match the key used by yeison_panel_backend
@@ -62,6 +80,15 @@ class Settings(BaseSettings):
     r2_access_key_id: str = ""
     r2_secret_access_key: str = ""
     r2_bucket_name: str = "yeison-storage"
+
+    # Bank QR through SIP (BMSCYeisonQRGenerator): URL and x-api-key of that service. Empty = off,
+    # agents keep the static QR image. bank_qr_notify_key is the key that service sends with its
+    # payment notices (its PAYMENT_NOTIFY_KEY).
+    bank_qr_api_url: Optional[str] = None
+    bank_qr_api_key: Optional[str] = None
+    bank_qr_notify_key: Optional[str] = None
+    bank_qr_timeout_seconds: float = 25.0
+    bank_qr_poll_seconds: int = 60
 
     class Config:
         env_file = ".env"

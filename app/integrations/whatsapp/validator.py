@@ -1,16 +1,11 @@
 """
-Twilio webhook signature validation.
+Webhook validation for WhatsApp providers.
 
-Each tenant's Twilio subaccount signs webhooks with its own auth token —
-not the master account token. We look up the subaccount token by the
-recipient phone number (the "To" field in the form payload) and use
-Twilio's official RequestValidator so the algorithm stays in sync with
-Twilio's implementation.
-
-Fallback: if no subaccount is found (e.g. sandbox testing, unconfigured
-agent), we fall back to ``settings.twilio_auth_token`` so local development
-still works without a full ISV setup.
+Evolution API is the primary provider. Twilio validation remains available as
+deprecated compatibility for legacy tenants.
 """
+
+import hmac
 
 from fastapi import Request
 from twilio.request_validator import RequestValidator
@@ -34,7 +29,7 @@ async def validate_twilio_signature(request: Request, form_data: dict) -> bool:
 
     # Resolve the auth token: per-tenant subaccount first, global fallback.
     to_phone = form_data.get("To", "")
-    _, auth_token = await get_subaccount_credentials(to_phone)
+    _, auth_token = await get_subaccount_credentials(to_phone)  # the subaccount's own, decrypted
 
     if not auth_token:
         auth_token = settings.twilio_auth_token
@@ -56,3 +51,24 @@ async def validate_twilio_signature(request: Request, form_data: dict) -> bool:
         )
 
     return is_valid
+
+
+async def validate_evolution_webhook(request: Request, payload: dict) -> bool:
+    """The shared secret Evolution sends in a header (set by the panel when it creates the instance, Y-10).
+
+    Without EVOLUTION_WEBHOOK_SECRET every webhook is refused, except in debug (local development).
+    """
+    expected_secret = settings.evolution_webhook_secret
+    if not expected_secret:
+        logger.warning("evolution_webhook_secret_missing")
+        return bool(settings.debug)
+
+    received_secret = (
+        request.headers.get("x-evolution-webhook-secret")
+        or request.headers.get("x-evolution-secret")
+        or ""
+    )
+    if not hmac.compare_digest(received_secret.encode(), expected_secret.encode()):
+        logger.warning("evolution_webhook_secret_invalid")
+        return False
+    return True

@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 
@@ -6,6 +8,9 @@ from app.core.database import close_db_connections
 from app.core.redis_client import close_redis_connection
 from app.api.v1.webhooks import router as webhook_router
 from app.api.v1.telegram_webhook import router as telegram_webhook_router
+from app.api.v1.internal_payments import router as internal_payments_router
+from app.api.v1.internal_simulator import router as internal_simulator_router
+from app.services import bank_qr, batch_manager
 
 
 @asynccontextmanager
@@ -13,9 +18,18 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager - handles startup and shutdown."""
     # Startup
     print(f"Starting {settings.app_name} v{settings.version}")
+    poller = asyncio.create_task(bank_qr.run_poller()) if bank_qr.is_configured() else None
+    if settings.batch_enabled:
+        # Messages queued when the container stopped (Y-57)
+        try:
+            await batch_manager.recover_pending()
+        except Exception as e:
+            print(f"Could not recover queued batches: {e}")
     yield
     # Shutdown
     print("Shutting down...")
+    if poller:
+        poller.cancel()
     await close_db_connections()
     await close_redis_connection()
 
@@ -25,12 +39,18 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.version,
     debug=settings.debug,
-    lifespan=lifespan
+    lifespan=lifespan,
+    # Y-96: the route map is public otherwise (staging.yeison.cloud/agent/docs); only for local work
+    docs_url="/docs" if settings.debug else None,
+    redoc_url="/redoc" if settings.debug else None,
+    openapi_url="/openapi.json" if settings.debug else None,
 )
 
 # Include routers
 app.include_router(webhook_router, prefix="/api/v1")
 app.include_router(telegram_webhook_router, prefix="/api/v1")
+app.include_router(internal_payments_router, prefix="/api/v1")
+app.include_router(internal_simulator_router, prefix="/api/v1")
 
 # Basic route
 @app. get("/")

@@ -1,0 +1,27 @@
+# Copy to tools/conversations.local.toml (ignored by git) and fill in the accounts.
+# Each case names a profile ("demo", "moda"); here each profile points to an account and its agent.
+# Use test accounts only: the cases run purchases through the test chat (nothing is saved, but
+# every turn counts as usage of the plan).
+
+[staging]
+api_url = "https://staging.yeison.cloud/api/v1"
+
+[staging.agents.demo]
+# «Demo Yeison» (farmacia, 3 productos), agente «Vendedor Demo»
+email = ""
+password = ""
+agent_id = 21
+
+[staging.agents.moda]
+# «Moda Andina DEMO» (7 productos), agente «Vendedor Moda Demo»
+email = ""
+password = ""
+agent_id = 22
+
+[local]
+api_url = "http://localhost:8070/api/v1"
+
+[local.agents.moda]
+email = ""
+password = ""
+agent_id = 1

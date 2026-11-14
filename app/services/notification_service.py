@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, List
 import structlog
 from datetime import datetime
 
+from app.core.money import money
 from app.integrations.whatsapp.client import send_whatsapp_message
 
 logger = structlog.get_logger()
@@ -22,7 +23,8 @@ class NotificationService:
         customer_name: Optional[str],
         products: List[Dict[str, Any]],
         lead_info: Optional[Dict[str, Any]] = None,
-        conversation_summary: Optional[str] = None
+        conversation_summary: Optional[str] = None,
+        currency: Optional[str] = None,
     ) -> bool:
         """
         Notify supervisor/manager about a completed sale.
@@ -52,7 +54,8 @@ class NotificationService:
             customer_name=customer_name,
             products=products,
             lead_info=lead_info,
-            conversation_summary=conversation_summary
+            conversation_summary=conversation_summary,
+            currency=currency,
         )
         
         try:
@@ -86,7 +89,8 @@ class NotificationService:
         customer_name: Optional[str],
         products: List[Dict[str, Any]],
         lead_info: Optional[Dict[str, Any]] = None,
-        conversation_summary: Optional[str] = None
+        conversation_summary: Optional[str] = None,
+        currency: Optional[str] = None,
     ) -> str:
         """Format a sale notification message."""
         
@@ -123,11 +127,11 @@ class NotificationService:
 
                 message_parts.append(
                     f"{i}. {product_name}\n"
-                    f"   💰 ${price:.2f} x {quantity} = ${subtotal:.2f}"
+                    f"   💰 {money(price, currency)} x {quantity} = {money(subtotal, currency)}"
                 )
 
             message_parts.append("")
-            message_parts.append(f"💵 *TOTAL: ${total:.2f}*")
+            message_parts.append(f"💵 *TOTAL: {money(total, currency)}*")
             message_parts.append("")
 
         # Additional context
@@ -355,7 +359,8 @@ class NotificationService:
         customer_name: Optional[str],
         products: List[Dict[str, Any]],
         proof_presigned_url: str,
-        lead_info: Optional[Dict[str, Any]] = None
+        lead_info: Optional[Dict[str, Any]] = None,
+        currency: Optional[str] = None,
     ) -> bool:
         """
         Forward payment proof from customer to supervisor via WhatsApp.
@@ -403,11 +408,11 @@ class NotificationService:
 
                 message_parts.append(
                     f"{i}. {product_name}\n"
-                    f"   💰 ${price:.2f} x {quantity} = ${subtotal:.2f}"
+                    f"   💰 {money(price, currency)} x {quantity} = {money(subtotal, currency)}"
                 )
 
             message_parts.append("")
-            message_parts.append(f"💵 *TOTAL: ${total:.2f}*")
+            message_parts.append(f"💵 *TOTAL: {money(total, currency)}*")
             message_parts.append("")
 
         # Proof info

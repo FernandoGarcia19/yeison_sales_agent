@@ -1,7 +1,9 @@
 import json
 import httpx
 import structlog
+from app.core import simulation
 from app.core.config import settings
+from app.core.money import money
 
 logger = structlog.get_logger()
 
@@ -42,13 +44,18 @@ async def send_payment_approval_request(
     conversation_id = sale_data.get("conversation_id", "0")
 
     checkout_str = "\n".join(f"    • {k}: {v}" for k, v in checkout_data.items()) or "    • N/A"
+    invoice_line = (
+        "🧾 <b>Pide factura</b> (su NIT/CI y razón social están en los datos)\n"
+        if sale_data.get("invoice_requested") else ""
+    )
     def _fmt_item(item: dict) -> str:
         name = item.get("name", "Item")
         qty = int(item.get("quantity", 1))
         unit_price = float(item.get("price", 0))
         subtotal = unit_price * qty
         if unit_price:
-            return f"    • {name} x{qty} @ ${unit_price:.2f} = <b>${subtotal:.2f}</b>"
+            currency = sale_data.get("currency")
+            return f"    • {name} x{qty} @ {money(unit_price, currency)} = <b>{money(subtotal, currency)}</b>"
         return f"    • {name} x{qty}"
 
     items_str = "\n".join(_fmt_item(item) for item in items) or "    • N/A"
@@ -57,7 +64,7 @@ async def send_payment_approval_request(
         f"🚨 <b>NUEVA SOLICITUD DE APROBACIÓN DE PAGO</b> 🚨\n\n"
         f"📱 <b>Teléfono:</b> {phone}\n"
         f"📋 <b>Items:</b>\n{items_str}\n"
-        f"💰 <b>Total a Pagar:</b> {total_price}\n\n"
+        f"💰 <b>Total a Pagar:</b> {total_price}\n{invoice_line}\n"
         f"📝 <b>Datos de Checkout:</b>\n{checkout_str}\n\n"
         f"⚠️ Revisa el comprobante adjunto y decide."
     )
@@ -70,6 +77,10 @@ async def send_payment_approval_request(
             ]
         ]
     }
+
+    if simulation.current():
+        simulation.capture("telegram", text=caption, buttons=["✅ Aprobar", "❌ Rechazar"], attachment="comprobante")
+        return
 
     is_image = content_type.startswith("image/")
     endpoint = "sendPhoto" if is_image else "sendDocument"
@@ -129,6 +140,10 @@ async def send_purchase_intent_notification(
     conversation_id = sale_data.get("conversation_id", "0")
 
     checkout_str = "\n".join(f"    • {k}: {v}" for k, v in checkout_data.items()) or "    • N/A"
+    invoice_line = (
+        "🧾 <b>Pide factura</b> (su NIT/CI y razón social están en los datos)\n"
+        if sale_data.get("invoice_requested") else ""
+    )
 
     def _fmt_item(item: dict) -> str:
         name = item.get("name", "Item")
@@ -136,7 +151,8 @@ async def send_purchase_intent_notification(
         unit_price = float(item.get("price", 0))
         subtotal = unit_price * qty
         if unit_price:
-            return f"    • {name} x{qty} @ ${unit_price:.2f} = <b>${subtotal:.2f}</b>"
+            currency = sale_data.get("currency")
+            return f"    • {name} x{qty} @ {money(unit_price, currency)} = <b>{money(subtotal, currency)}</b>"
         return f"    • {name} x{qty}"
 
     items_str = "\n".join(_fmt_item(item) for item in items) or "    • N/A"
@@ -145,7 +161,7 @@ async def send_purchase_intent_notification(
         f"🛒 <b>NUEVA INTENCIÓN DE COMPRA — PAGO FÍSICO</b>\n\n"
         f"📱 <b>Teléfono:</b> {phone}\n"
         f"📋 <b>Items:</b>\n{items_str}\n"
-        f"💰 <b>Total estimado:</b> {total_price}\n\n"
+        f"💰 <b>Total estimado:</b> {total_price}\n{invoice_line}\n"
         f"📝 <b>Datos de entrega:</b>\n{checkout_str}\n\n"
         f"ℹ️ El cliente eligió pago físico/efectivo. Aprueba para confirmar el pedido o rechaza para cancelarlo."
     )
@@ -158,6 +174,10 @@ async def send_purchase_intent_notification(
             ]
         ]
     }
+
+    if simulation.current():
+        simulation.capture("telegram", text=text, buttons=["✅ Aprobar pedido", "❌ Rechazar pedido"])
+        return
 
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     payload = {
@@ -180,3 +200,131 @@ async def send_purchase_intent_notification(
         logger.error("telegram_purchase_intent_failed", error=str(e), response=e.response.text)
     except Exception as e:
         logger.error("telegram_purchase_intent_error", error=str(e))
+
+
+async def send_bank_qr_paid_notification(chat_id: str, sale_data: dict) -> bool:
+    """
+    Tell the supervisor a bank QR payment was confirmed by the bank. Nothing to approve.
+    `note` flags a payment to look at (late or duplicate) and `closing` replaces the last line.
+    Returns whether it was sent.
+    """
+    if not settings.telegram_bot_token:
+        return False
+
+    checkout_str = "\n".join(f"    • {k}: {v}" for k, v in (sale_data.get("checkout_data") or {}).items()) or "    • N/A"
+    items_str = "\n".join(
+        f"    • {i.get('name') or i.get('product_name', 'Producto')} x{int(i.get('quantity', 1))}"
+        for i in sale_data.get("items") or []
+    ) or "    • N/A"
+    invoice_line = (
+        "🧾 <b>Pide factura</b> (su NIT/CI y razón social están en los datos)\n"
+        if sale_data.get("invoice_requested") else ""
+    )
+    sale_line = f"🧾 Venta #{sale_data['sale_id']} registrada.\n" if sale_data.get("sale_id") else ""
+    note_line = f"⚠️ <b>{sale_data['note']}</b>\n\n" if sale_data.get("note") else ""
+    closing = sale_data.get("closing") or "ℹ️ No hace falta aprobar: el cliente ya recibió la confirmación. Prepara el pedido."
+    text = (
+        f"✅ <b>PAGO CONFIRMADO POR EL BANCO (QR)</b>\n\n{note_line}"
+        f"📱 <b>Teléfono:</b> {sale_data.get('phone', 'N/A')}\n"
+        f"📋 <b>Items:</b>\n{items_str}\n"
+        f"💰 <b>Pagado:</b> {sale_data.get('total_price', '')}\n{invoice_line}{sale_line}\n"
+        f"📝 <b>Datos de entrega:</b>\n{checkout_str}\n\n"
+        f"{closing}"
+    )
+    if simulation.current():
+        simulation.capture("telegram", text=text)
+        return True
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            response.raise_for_status()
+        logger.info("telegram_bank_qr_paid_sent", chat_id=chat_id)
+        return True
+    except Exception as e:
+        logger.error("telegram_bank_qr_paid_failed", error=str(e))
+        return False
+
+
+async def send_handoff_notification(chat_id: str, data: dict) -> None:
+    """A customer asked for a person; the agent stays quiet with them until «Reanudar agente» (Y-58)."""
+    if not settings.telegram_bot_token:
+        return
+    who = f"{data.get('name')} ({data.get('phone')})" if data.get("name") else data.get("phone", "N/A")
+    text = (
+        f"🙋 <b>UN CLIENTE PIDE HABLAR CON UNA PERSONA</b>\n\n"
+        f"📱 <b>Cliente:</b> {who}\n"
+        f"💬 <b>Escribió:</b> {data.get('message', '')}\n\n"
+        f"El agente dejó de responderle. Escríbele por WhatsApp; cuando termines, toca «Reanudar agente»."
+    )
+    buttons = {"inline_keyboard": [[{"text": "▶️ Reanudar agente", "callback_data": f"resume_agent_{data.get('conversation_id', '0')}"}]]}
+    if simulation.current():
+        simulation.capture("telegram", text=text, buttons=["▶️ Reanudar agente"])
+        return
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                                                    "reply_markup": json.dumps(buttons)})
+            response.raise_for_status()
+        logger.info("telegram_handoff_sent", chat_id=chat_id)
+    except Exception as e:
+        logger.error("telegram_handoff_failed", error=str(e))
+
+
+_MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
+
+
+async def send_document(chat_id: str, content: bytes, filename: str, caption: str = "",
+                        content_type: str = "application/pdf") -> bool:
+    """Send a file (an HR document from the Director, Y-81) with sendDocument. False when it was not sent."""
+    if not settings.telegram_bot_token:
+        logger.warning("telegram_bot_token_not_set")
+        return False
+    if not content or len(content) > _MAX_DOCUMENT_BYTES:
+        logger.error("telegram_document_invalid_size", chat_id=chat_id, size=len(content or b""))
+        return False
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendDocument"
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, data={"chat_id": chat_id, "caption": (caption or "")[:1024]},
+                                         files={"document": (filename or "documento.pdf", content, content_type)})
+            response.raise_for_status()
+        logger.info("telegram_document_sent", chat_id=chat_id, filename=filename)
+        return True
+    except httpx.HTTPStatusError as e:
+        logger.error("telegram_document_failed", error=str(e), response=e.response.text[:200])
+    except Exception as e:
+        logger.error("telegram_document_error", error=str(e))
+    return False
+
+
+async def send_turn_failure_notification(chat_id: str, data: dict) -> bool:
+    """The agent could not answer a customer (Y-63): the supervisor should write to them."""
+    from html import escape
+
+    if not settings.telegram_bot_token:
+        return False
+    phone = escape(str(data.get("phone") or "N/A"))
+    who = f"{escape(str(data['name']))} ({phone})" if data.get("name") else phone
+    told = ("Le avisamos que una persona lo atenderá." if data.get("fallback_sent")
+            else "No pudimos avisarle: su WhatsApp tampoco respondió.")
+    text = (
+        f"⚠️ <b>EL AGENTE NO PUDO RESPONDER</b>\n\n"
+        f"📱 <b>Cliente:</b> {who}\n"
+        f"💬 <b>Escribió:</b> {escape(str(data.get('message') or '')[:500])}\n\n"
+        f"Hubo una falla técnica. {told} Escríbele por WhatsApp; el agente vuelve a responder solo en el siguiente mensaje."
+    )
+    if simulation.current():
+        simulation.capture("telegram", text=text, buttons=[])
+        return True
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            response.raise_for_status()
+        logger.info("telegram_turn_failure_sent", chat_id=chat_id)
+        return True
+    except Exception as e:
+        logger.error("telegram_turn_failure_failed", error=str(e))
+        return False

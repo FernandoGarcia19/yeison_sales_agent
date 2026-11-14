@@ -1,0 +1,6 @@
+name = "Dos productos en un mensaje"
+agent = "moda"
+
+[[turns]]
+say = "Quiero 2 packs de medias y una gorra Illimani"
+expect = { state = "fulfillment_coord", cart = { "Medias pack x3" = 2, "Gorra bordada Illimani" = 1 } }

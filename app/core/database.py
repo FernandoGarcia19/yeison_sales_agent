@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool, QueuePool
 
+from app.core import simulation
 from app.core.config import settings
 
 
@@ -65,7 +66,18 @@ def get_engine() -> AsyncEngine:
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
     """
     Get or create the session factory.
+
+    Inside a simulation (the agent test chat) it returns the run's factory, whose sessions
+    all join one transaction that is rolled back at the end of the turn.
     """
+    run = simulation.current()
+    if run is not None:
+        return run.session_factory
+    return get_base_session_factory()
+
+
+def get_base_session_factory() -> async_sessionmaker[AsyncSession]:
+    """The real session factory, also inside a simulation (e.g. for LLM usage rows)."""
     global _session_factory
     
     if _session_factory is None:

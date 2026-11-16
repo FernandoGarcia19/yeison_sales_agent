@@ -218,6 +218,9 @@ def main() -> int:
     panel = Panel(env["api_url"])
     for profile in sorted({c.profile for c in cases}):
         account = env["agents"][profile]
+        if account.get("token"):  # a session token instead of the password (e.g. minted on the server)
+            panel.tokens[profile] = account["token"]
+            continue
         try:
             panel.login(profile, account["email"], account["password"])
         except RuntimeError as e:

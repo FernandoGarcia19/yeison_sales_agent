@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # Small model for the internal steps (classification, decision, extraction), e.g. gpt-5.4-nano;
     # empty = openai_model for everything. The reply the customer reads always uses openai_model (Y-16).
     openai_small_model: Optional[str] = None
+    # reasoning_effort sent to the model (none, low, medium...). Empty = the model's default. The newer
+    # models (gpt-6-*) reason by default and then only take temperature 1: "none" keeps the answer fast,
+    # cheap and with our temperature. OPENAI_REASONING_EFFORT for the reply, the SMALL one for internal steps.
+    openai_reasoning_effort: Optional[str] = None
+    openai_small_reasoning_effort: Optional[str] = None
     # prompt_cache_key per agent and step, so OpenAI reuses the cached prompt prefixes (Y-16)
     prompt_cache_enabled: bool = True
     # USD per 1M tokens for models not in app/services/llm_usage.KNOWN_PRICES, as JSON (Y-15)

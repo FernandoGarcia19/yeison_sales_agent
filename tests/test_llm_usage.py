@@ -16,7 +16,7 @@ def test_cost_of_known_models_and_overrides(monkeypatch):
     assert llm_usage.cost_of("gpt-4o-mini", 1000, 500, 200) == Decimal("0.000435")
     assert llm_usage.cost_of("openai/gpt-4o-mini-2024-07-18", 1_000_000, 0) == Decimal("0.15")
     assert llm_usage.cost_of("gpt-4o", 0, 1_000_000) == Decimal("10.0")
-    assert llm_usage.cost_of("gpt-5.4-mini", 1000, 1000) is None  # unknown price: tokens only
+    assert llm_usage.cost_of("some-new-model", 1000, 1000) is None  # unknown price: tokens only
     monkeypatch.setattr(settings, "llm_prices", '{"gpt-5.4-mini": [0.25, 2.0, 0.025]}')
     assert llm_usage.cost_of("gpt-5.4-mini", 1_000_000, 1_000_000) == Decimal("2.25")
 

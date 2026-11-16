@@ -32,6 +32,9 @@ def model_for(step: str) -> str:
 def request_options(context: Optional[PipelineContext], step: str, **body: Any) -> dict:
     """extra_body for chat.completions.create: the given options plus the cache key, on OpenAI only."""
     agent_id = getattr(context, "agent_instance_id", None)
+    effort = settings.openai_small_reasoning_effort if step in SMALL_STEPS else settings.openai_reasoning_effort
+    if effort and not settings.use_openrouter:
+        body["reasoning_effort"] = effort
     if settings.prompt_cache_enabled and not settings.use_openrouter and agent_id:
         body["prompt_cache_key"] = f"yeison-agent-{agent_id}-{step}"
     return body

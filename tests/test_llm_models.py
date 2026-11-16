@@ -68,3 +68,26 @@ async def test_the_classifier_calls_the_small_model_with_the_cache_key(monkeypat
     assert recorded[0] == ("sales.classification", "gpt-5.4-nano")
     # an intent outside the list (small models do this) is "unknown", not an error
     assert await stage._classify_intent_ai("¿cuánto cuesta?", [], context=_context()) == ("unknown", 0.3)
+
+
+def test_reasoning_effort_per_kind_of_step(monkeypatch):
+    """gpt-6-* reason by default and then refuse our temperature: the effort is set per kind of step."""
+    monkeypatch.setattr(settings, "use_openrouter", False)
+    monkeypatch.setattr(settings, "prompt_cache_enabled", False)
+    monkeypatch.setattr(settings, "openai_reasoning_effort", None)
+    monkeypatch.setattr(settings, "openai_small_reasoning_effort", "none")
+    assert llm_models.request_options(_context(), "classification") == {"reasoning_effort": "none"}
+    assert llm_models.request_options(_context(), "response") == {}
+
+    monkeypatch.setattr(settings, "openai_reasoning_effort", "low")
+    assert llm_models.request_options(_context(), "response") == {"reasoning_effort": "low"}
+
+    monkeypatch.setattr(settings, "use_openrouter", True)
+    assert "reasoning_effort" not in llm_models.request_options(_context(), "response")
+
+
+def test_the_models_in_use_have_a_price():
+    assert llm_usage.cost_of("gpt-5.4-mini-2026-03-17", 1_000_000, 0) == llm_usage.cost_of("gpt-5.4-mini", 1_000_000, 0)
+    assert float(llm_usage.cost_of("gpt-5.4-mini", 1_000_000, 1_000_000)) == 5.25
+    assert float(llm_usage.cost_of("gpt-5.4-nano", 1_000_000, 0)) == 0.20
+    assert float(llm_usage.cost_of("gpt-6-luna", 0, 1_000_000)) == 0.50

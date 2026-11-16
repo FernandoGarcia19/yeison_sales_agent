@@ -32,6 +32,15 @@ KNOWN_PRICES: dict[str, tuple[float, float, float]] = {
     "gpt-4.1-nano": (0.10, 0.40, 0.025),
     "gpt-4.1-mini": (0.40, 1.60, 0.10),
     "gpt-4.1": (2.00, 8.00, 0.50),
+    # OpenAI standard prices checked on 2026-11-16 (developers.openai.com/api/docs/pricing)
+    "gpt-5.4-mini": (0.75, 4.50, 0.075),
+    "gpt-5.4-nano": (0.20, 1.25, 0.02),
+    "gpt-5.4": (2.50, 15.00, 0.25),
+    "gpt-5-mini": (0.25, 2.00, 0.025),
+    "gpt-5-nano": (0.05, 0.40, 0.005),
+    "gpt-6-luna": (0.10, 0.50, 0.01),
+    "gpt-6.1-terra": (1.00, 5.00, 0.05),
+    "gpt-6.1-sol": (2.00, 10.00, 0.10),
 }
 
 _pending: set[asyncio.Task] = set()

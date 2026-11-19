@@ -7,13 +7,14 @@ exist or more units than there are. Every change is reported back (`changes`) an
 only claim what is there.
 
 A cart line is the catalogue product with the units ordered in `quantity` and the stock in `stock`
-(None = the business does not count it).
+(None = the business does not count it, or it is a service or a plan: never capped, Y-103).
 """
 
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.money import money
+from app.services import product_sheet
 from app.services.catalog_search import words
 from app.services.purchase_confirmation import normalize
 
@@ -33,13 +34,20 @@ def _as_int(value: Any) -> Optional[int]:
 
 def line_from_product(product: Dict[str, Any], quantity: int) -> Dict[str, Any]:
     """A cart line from a catalogue product (whose `quantity` is the stock)."""
-    return {
+    line = {
         "id": product.get("id"),
         "name": product.get("name") or product.get("product_name") or "Producto",
         "price": str(product.get("price", "0")),
         "quantity": quantity,
-        "stock": product.get("quantity"),
+        "stock": None if product_sheet.is_service_like(product) else product.get("quantity"),
     }
+    if product_sheet.is_service_like(product):
+        # A service or a plan: the checkout asks for its modality and preferred time, not for delivery
+        line["kind"] = product_sheet.kind(product)
+        mode = product_sheet.modality(product)
+        if mode:
+            line["modality"] = mode
+    return line
 
 
 def might_edit(message: Optional[str], products: List[Dict[str, Any]]) -> bool:
@@ -90,7 +98,10 @@ def apply(items: List[Dict[str, Any]], operations: List[Dict[str, Any]],
 
         wanted = quantity if kind == "set" or not line else int(line["quantity"]) + quantity
         # The catalogue has today's stock (its `quantity`); a line keeps what it had when added
-        stock = _as_int(product.get("quantity")) if product else _as_int(line.get("stock"))
+        if product_sheet.is_service_like(product or line):
+            stock = None  # services and plans have no stock to run out of
+        else:
+            stock = _as_int(product.get("quantity")) if product else _as_int(line.get("stock"))
         applied = wanted if stock is None else min(wanted, max(stock, 0))
         name = line["name"] if line else (product.get("name") or product.get("product_name"))
         if applied <= 0:

@@ -12,7 +12,7 @@ from app.integrations.whatsapp.client import send_whatsapp_message
 from app.integrations.whatsapp.formatting import to_whatsapp
 from app.core.config import settings
 from app.core.money import label as currency_label, money
-from app.services import cart, delivery
+from app.services import cart, delivery, product_sheet
 from app.services import llm_usage
 from app.services.pipeline.llm_models import model_for, request_options
 
@@ -393,6 +393,12 @@ REGLAS QUE NO SE ROMPEN:
 - El nombre de tu empresa es {company_name} y tu nombre es {agent_name}."""
 
         state_instructions = self._state_instructions(context)
+        if (context.checkout_data or {}).get(delivery.PREFERRED_TIME_FIELD) and context.current_state in (
+            ConversationState.AWAITING_PAYMENT_METHOD, ConversationState.AWAITING_RECEIPT
+        ):
+            # Y-103: until there is an agenda (Y-104) a person confirms the appointment
+            state_instructions += (" El día y la hora que pidió el cliente todavía no están confirmados: una persona "
+                                   "del equipo se los confirma por este chat.")
         if state_instructions:
             system_prompt += f"\n\nINSTRUCCIONES DE ESTADO ACTUAL:\n{state_instructions}"
 
@@ -430,6 +436,13 @@ REGLAS QUE NO SE ROMPEN:
                 f"Pide amablemente la información faltante. NO envíes el QR ni menciones el pago "
                 f"hasta que el usuario haya proporcionado todos los datos requeridos."
             )
+            if delivery.only_services(context.cart_contents):
+                instructions += " Es un servicio o un plan: NO preguntes por envío ni por retiro en tienda."
+            if delivery.PREFERRED_TIME_FIELD in missing:
+                instructions += (
+                    " Pregunta qué día y a qué hora prefiere el cliente y aclara que una persona del equipo le "
+                    "confirmará el horario: tú no confirmas citas."
+                )
             if invoice_asked:
                 instructions += (
                     " El cliente pidió factura: el NIT o CI y la razón social (los datos «para la factura») sirven para "
@@ -503,13 +516,16 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
         if context.relevant_products and len(context.relevant_products) > 0:
             prompt += "PRODUCTOS RELEVANTES:\n"
             for product in context.relevant_products:
-                prompt += f"- {product.get('name', 'N/A')}\n"
-                prompt += f"  Precio: {money(product.get('price', 'N/A'), self._currency(context))}\n"
-                prompt += f"  Disponibilidad: {product.get('quantity', 0)} unidades\n"
-                if product.get('description'):
-                    desc = product['description'][:100]
-                    prompt += f"  Descripción: {desc}...\n"
-                prompt += "\n"
+                prompt += self._product_block(product, self._currency(context))
+            if any(product.get("details") for product in context.relevant_products):
+                prompt += (
+                    "REGLA DE LA FICHA: sobre un producto, servicio o plan con FICHA responde solo con su ficha, su "
+                    "descripción y su precio. Si lo que preguntan no figura ahí, NO lo supongas: di que lo consultas "
+                    "con el equipo y le avisan por aquí.\n\n"
+                )
+            if any(product_sheet.is_service_like(product) for product in context.relevant_products):
+                prompt += ("Los servicios y planes no tienen stock: nunca digas cuántos quedan, si hay unidades "
+                           "ni que se agotan.\n\n")
         
         # Add lead information
         if context.lead_info:
@@ -562,7 +578,9 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
                 }.get(next_step, "Muestra el pedido actualizado con su total y pregunta si lo confirma o quiere algo más.\n\n")
             prompt += "RESULTADO DE ACCIÓN EJECUTADA:\n"
             prompt += f"Acción: {context.action_type}\n"
-            prompt += f"Resultado: {json.dumps(context.action_result, ensure_ascii=False)}\n\n"
+            # The products are already in PRODUCTOS RELEVANTES (with their sheets): not twice
+            shown = {k: v for k, v in context.action_result.items() if k != "products"}
+            prompt += f"Resultado: {json.dumps(shown, ensure_ascii=False)}\n\n"
             if context.action_result.get("action") == "qualify_lead":
                 # The customer has not confirmed: the order does not exist yet
                 prompt += (
@@ -575,6 +593,27 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         
         return prompt
     
+    @staticmethod
+    def _product_block(product: dict, currency: Optional[str]) -> str:
+        """One product of PRODUCTOS RELEVANTES: price, stock (only when it is counted), kind and sheet (Y-103)."""
+        label = product_sheet.kind_label(product)
+        text = f"- {product.get('name', 'N/A')}" + (f" ({label})" if label else "") + "\n"
+        text += f"  Precio: {money(product.get('price', 'N/A'), currency)}\n"
+        if product.get("duration_minutes"):
+            text += f"  Duración: {product['duration_minutes']} minutos\n"
+        if not label:  # a service or a plan has no stock to talk about
+            if product.get("quantity") is None:
+                text += "  Disponibilidad: disponible (no se controla stock)\n"
+            else:
+                text += f"  Disponibilidad: {product.get('quantity')} unidades\n"
+        if product.get("description"):
+            description = product["description"]
+            text += f"  Descripción: {description[:100]}{'...' if len(description) > 100 else ''}\n"
+        sheet = product_sheet.prompt_lines(product)
+        if sheet:
+            text += "  FICHA:\n" + "".join(f"    {line}\n" for line in sheet)
+        return text + "\n"
+
     def _generate_fallback_response(self, context: PipelineContext) -> str:
         """
         Generate fallback template-based response when AI fails.
@@ -672,7 +711,10 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
         response = f"Sí, tenemos {available_count} disponibles:\n\n"
         
         for product in products[:3]:
-            response += f"• {product['name']} - {product['quantity']} unidades disponibles\n"
+            if product.get("quantity") is None:
+                response += f"• {product['name']}\n"
+            else:
+                response += f"• {product['name']} - {product['quantity']} unidades disponibles\n"
         
         return response
     

@@ -194,6 +194,8 @@ class ActionExecutorStage(BasePipelineStage):
         """«Paso a recogerlo» / «envíamelo a casa»: how the order leaves the shop decides what is asked."""
         if context.current_state not in (None, ConversationState.BROWSING, *CART_STATES):
             return
+        if delivery.only_services(context.cart_contents):
+            return  # a service is not delivered: «a domicilio» is its modality (Y-103)
         method = delivery.detect_method(context.message_body)
         options = (context.agent_config or {}).get("delivery") or delivery.from_operations(None)
         if method and method in delivery.methods(options):
@@ -947,8 +949,12 @@ class ActionExecutorStage(BasePipelineStage):
             self.log_info("checkout_fields_extracted", fields=list(extracted.keys()))
 
         # "Retiro en tienda" or "envío" decides whether an address is needed (Y-58)
+        if delivery.only_services(context.cart_contents):
+            # Services and plans are not delivered (Y-103)
+            context.cart_contents.pop("delivery_method", None)
+            context.checkout_data.pop(delivery.METHOD_FIELD, None)
         choice = context.checkout_data.get(delivery.METHOD_FIELD)
-        if choice and not context.cart_contents.get("delivery_method"):
+        if choice and not context.cart_contents.get("delivery_method") and not delivery.only_services(context.cart_contents):
             method = delivery.detect_method(choice)
             if method:
                 context.cart_contents["delivery_method"] = method
@@ -1226,14 +1232,14 @@ class ActionExecutorStage(BasePipelineStage):
                 # Cart wins; relevant_products is only the inventory match (with stock counts as quantity).
                 products = context.cart_contents.get("items") or context.relevant_products
                 total = sum(
-                    float(p.get("price", 0)) * int(p.get("quantity", 1)) for p in products
+                    float(p.get("price", 0)) * int(p.get("quantity") or 1) for p in products
                 )
                 sale_data = {
                     "phone": context.sender_phone,
                     "items": [
                         {
                             "name": p.get("name") or p.get("product_name", "Producto"),
-                            "quantity": p.get("quantity", 1),
+                            "quantity": p.get("quantity") or 1,
                             "price": float(p.get("price", 0)),
                         }
                         for p in products
@@ -1345,7 +1351,7 @@ class ActionExecutorStage(BasePipelineStage):
         context.cart_contents["payment_proof_submitted"] = True
 
         products = context.cart_contents.get("items") or context.relevant_products
-        total = sum(float(p.get("price", 0)) * int(p.get("quantity", 1)) for p in products)
+        total = sum(float(p.get("price", 0)) * int(p.get("quantity") or 1) for p in products)
 
         # Telegram notification with approve/reject buttons (no receipt file)
         tg_config = (context.agent_config.get("integrations") or {}).get("telegram") or {}
@@ -1358,7 +1364,7 @@ class ActionExecutorStage(BasePipelineStage):
                 "items": [
                     {
                         "name": p.get("name") or p.get("product_name", "Producto"),
-                        "quantity": p.get("quantity", 1),
+                        "quantity": p.get("quantity") or 1,
                         "price": float(p.get("price", 0)),
                     }
                     for p in products

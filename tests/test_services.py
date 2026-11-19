@@ -222,3 +222,55 @@ def test_the_user_prompt_has_the_sheet_rule_and_the_service_checkout(monkeypatch
     context.cart_contents = {"items": _items(2)}
     instructions = stage._state_instructions(context)
     assert "NO preguntes por envío" in instructions and "una persona del equipo" in instructions
+
+
+# --- what the staging battery showed (2026-11-19) -------------------------------------------------
+
+def test_the_modality_is_read_from_the_message():
+    assert delivery.detect_modality("Virtual, a nombre de Ana Rojas") == "Virtual"
+    assert delivery.detect_modality("prefiero por videollamada") == "Virtual"
+    assert delivery.detect_modality("En el local, soy Ana") == "En el local"
+    assert delivery.detect_modality("que vengan a domicilio") == "A domicilio"
+    # In a mixed cart «a domicilio» is the delivery of the products
+    assert delivery.detect_modality("a domicilio", home_allowed=False) is None
+    # Two at once, or none: the agent asks
+    assert delivery.detect_modality("virtual o en el local, no sé") is None
+    assert delivery.detect_modality("Ana Rojas") is None
+
+
+def test_a_shortened_field_name_from_the_model_is_accepted():
+    fields = [delivery.MODALITY_FIELD, delivery.NAME_FIELD]
+    assert delivery.match_field("Modalidad del servicio", fields) == delivery.MODALITY_FIELD
+    assert delivery.match_field("modalidad", fields) == delivery.MODALITY_FIELD
+    assert delivery.match_field(delivery.NAME_FIELD, fields) == delivery.NAME_FIELD
+    assert delivery.match_field("Teléfono", fields) is None
+
+
+async def test_virtual_and_a_name_close_the_service_checkout(executor, monkeypatch):
+    async def model_misses_the_modality(message, required, collected, context=None):
+        return {delivery.NAME_FIELD: "Ana Rojas"}
+
+    async def fake_payment(context):
+        context.action_result = {"action": "physical_payment_initiated"}
+
+    async def no_qr(context):
+        return {"qr": False, "physical": True}
+
+    monkeypatch.setattr(executor, "_extract_checkout_fields", model_misses_the_modality)
+    monkeypatch.setattr(executor, "_handle_physical_payment_flow", fake_payment)
+    monkeypatch.setattr(executor, "_get_payment_methods_enabled", no_qr)
+    context = PipelineContext(message_sid="m1", sender_phone="+59170000001", recipient_phone="+59170000009",
+                              message_body="Virtual, a nombre de Ana Rojas", conversation_history=[],
+                              agent_config={"tenant_info": {"currency": "BOB"}, **CONFIG})
+    context.intent, context.current_state = IntentType.UNKNOWN, ConversationState.FULFILLMENT_COORD
+    context.cart_contents = {"items": _items(4)}
+    await executor.process(context)
+    assert context.checkout_data[delivery.MODALITY_FIELD] == "Virtual"
+    assert context.action_result["action"] == "physical_payment_initiated"
+
+
+def test_a_general_question_gets_only_the_items_it_names():
+    plan = catalog_search.named(CATALOGUE, "¿Qué incluye el Plan Club mensual?")
+    assert [p["name"] for p in plan] == ["Plan Club mensual"]
+    assert catalog_search.with_sheets_of_the_turn(plan, "¿Qué incluye el Plan Club mensual?")[0]["details"]
+    assert catalog_search.named(CATALOGUE, "¿A qué hora abren?") == []

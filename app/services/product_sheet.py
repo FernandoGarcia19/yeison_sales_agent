@@ -80,9 +80,10 @@ def field(details: Any, keys: Iterable[str]) -> Optional[str]:
 
 
 def text(details: Any) -> str:
-    """Every word of the sheet, for the catalogue search."""
+    """The words of the sheet for the catalogue search: values and questions. Not the field labels («Qué
+    incluye», «Duración»), which every sheet has: «¿qué incluye el plan?» must not find every service."""
     sheet = clean(details)
-    parts = [f"{f['label']} {f['value']}" for f in sheet["fields"]]
+    parts = [f["value"] for f in sheet["fields"]]
     parts += [f"{q['q']} {q['a']}" for q in sheet["faq"]]
     return " ".join(parts)
 

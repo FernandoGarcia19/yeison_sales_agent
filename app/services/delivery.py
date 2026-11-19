@@ -78,6 +78,32 @@ def methods(options: Dict[str, Any]) -> List[str]:
     return chosen or [PICKUP, DELIVERY]
 
 
+_VIRTUAL_WORDS = re.compile(r"\b(virtual\w*|online|on line|en linea|por (video)?llamada|videollamada|zoom|meet|remot\w*)\b")
+_LOCAL_WORDS = re.compile(r"\b(en el local|en la tienda|en tienda|en su local|en el negocio|presencial\w*|voy al local|ir al local)\b")
+_HOME_WORDS = re.compile(r"\b(a domicilio|domicilio|a mi casa|en mi casa|vengan a|vengas a)\b")
+
+
+def detect_modality(message: Optional[str], home_allowed: bool = True) -> Optional[str]:
+    """How the customer wants a service (Y-103): «Virtual», «En el local» or «A domicilio»; None if unclear.
+    In a mixed cart «a domicilio» is the delivery of the products, so it only counts when `home_allowed`."""
+    text = normalize(message)
+    found = [label for label, words, allowed in (("Virtual", _VIRTUAL_WORDS, True), ("En el local", _LOCAL_WORDS, True),
+                                                   ("A domicilio", _HOME_WORDS, home_allowed))
+             if allowed and words.search(text)]
+    return found[0] if len(found) == 1 else None
+
+
+def match_field(key: str, fields: List[str]) -> Optional[str]:
+    """The required field a key from the model names, even shortened: «Modalidad del servicio» → its full name."""
+    if key in fields:
+        return key
+    plain = normalize(key).strip()
+    if not plain:
+        return None
+    candidates = [f for f in fields if normalize(f).startswith(plain) or plain.startswith(normalize(f).split(" (")[0])]
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def detect_method(message: Optional[str]) -> Optional[str]:
     text = normalize(message)
     pickup = bool(_PICKUP_WORDS.search(text))

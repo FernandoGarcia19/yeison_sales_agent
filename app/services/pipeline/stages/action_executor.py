@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.core.money import money
 from app.services import bank_qr, cart, delivery, handoff, invoice_request, llm_usage, purchase_confirmation
 from app.services.pipeline.llm_models import model_for, request_options
+from app.services.customers import ensure_customer
 
 
 # Before payment the cart can still change (Y-56)
@@ -904,6 +905,7 @@ class ActionExecutorStage(BasePipelineStage):
         from sqlalchemy import update as sa_update
         session_factory = get_session_factory()
         async with session_factory() as db:
+            new_lead.customer_id = await ensure_customer(db, context.tenant_id, clean_phone, customer_name)
             db.add(new_lead)
             await db.flush()
             await db.execute(

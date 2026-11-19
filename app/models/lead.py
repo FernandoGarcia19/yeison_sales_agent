@@ -58,6 +58,13 @@ class Lead(Base, TimestampMixin, ActiveMixin):
         nullable=True,
         index=True
     )
+    # Y-70: the customer this purchase cycle belongs to
+    customer_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("customer.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )
 
     # Relationships
     tenant: Mapped["Tenant"] = relationship(

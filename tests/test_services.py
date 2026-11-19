@@ -274,3 +274,48 @@ def test_a_general_question_gets_only_the_items_it_names():
     assert [p["name"] for p in plan] == ["Plan Club mensual"]
     assert catalog_search.with_sheets_of_the_turn(plan, "¿Qué incluye el Plan Club mensual?")[0]["details"]
     assert catalog_search.named(CATALOGUE, "¿A qué hora abren?") == []
+
+
+# «Quiero el Club Moda Andina mensual» stayed in cart_building (staging battery, case 52, 2026-11-19)
+
+def test_wanting_an_item_by_its_article_and_the_service_verbs():
+    from app.services import purchase_confirmation as pc
+    assert pc.asks_for_item("Quiero el Club Moda Andina mensual")
+    assert not pc.closes_purchase("Quiero el Club Moda Andina mensual")  # only with the item in the cart
+    for message in ("quiero contratar el plan", "me suscribo al club", "contrato la asesoría", "quiero inscribirme"):
+        assert pc.closes_purchase(message), message
+    for message in ("¿cómo contrato?", "¿qué incluye el plan?", "¿el plan tiene permanencia?"):
+        assert not pc.closes_purchase(message) and not pc.asks_for_item(message), message
+
+
+def _purchase_context(message):
+    context = PipelineContext(message_sid="m1", sender_phone="+59170000001", recipient_phone="+59170000009",
+                              message_body=message, conversation_history=[],
+                              agent_config={"tenant_info": {"currency": "BOB"}, **CONFIG})
+    context.intent, context.current_state = IntentType.PURCHASE_INTENT, ConversationState.BROWSING
+    context.relevant_products = CATALOGUE
+    return context
+
+
+async def test_quiero_el_plan_goes_straight_to_the_checkout(executor, monkeypatch):
+    async def adds_the_plan(context):
+        return {"operations": [{"op": "add", "id": 3, "quantity": 1}], "cancel": False}
+
+    monkeypatch.setattr(executor, "_extract_cart_operations", adds_the_plan)
+    context = _purchase_context("Quiero el Club Moda Andina mensual")
+    await executor.process(context)
+    assert [line["name"] for line in context.cart_contents["items"]] == ["Plan Club mensual"]
+    assert context.current_state == ConversationState.FULFILLMENT_COORD
+    assert context.action_result["action"] == "collect_checkout_data"
+    assert context.action_result["missing_fields"] == [delivery.NAME_FIELD]
+
+
+async def test_an_interest_without_asking_for_it_still_asks_to_confirm(executor, monkeypatch):
+    async def adds_the_plan(context):
+        return {"operations": [{"op": "add", "id": 3, "quantity": 1}], "cancel": False}
+
+    monkeypatch.setattr(executor, "_extract_cart_operations", adds_the_plan)
+    context = _purchase_context("Me interesa el plan mensual")
+    await executor.process(context)
+    assert context.current_state == ConversationState.CART_BUILDING
+    assert context.action_result["action"] == "qualify_lead"

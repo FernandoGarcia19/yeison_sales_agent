@@ -115,25 +115,32 @@ class ContextBuilderStage(BasePipelineStage):
             # Load relevant inventory based on intent (with tenant-scoped caching). A bare "sí"
             # to the agent's offer is classified as unknown but closes a purchase (action_executor)
             # A cart in progress may change with any message ("quita la gorra"), so it gets the catalogue too (Y-56)
-            if context.intent in ["product_inquiry", "pricing_question", "availability_check", "purchase_intent"] or (
-                purchase_confirmation.confirms_offer(context.message_body, context.conversation_history)
-            ) or context.current_state in (
-                ConversationState.CART_BUILDING, ConversationState.FULFILLMENT_COORD, ConversationState.AWAITING_PAYMENT_METHOD
-            ):
-                # The whole catalogue is cached (the old key held only 5 products)
-                inventory_cache_key = build_inventory_cache_key(context.tenant_id) + ":catalogue"
-                catalogue = await cache_get(inventory_cache_key)
-
-                if catalogue is not None:
-                    self.log_info("inventory_from_cache", tenant_id=context.tenant_id)
-                else:
-                    catalogue = await self._load_catalogue(db, context.tenant_id)
-                    # Cache inventory for 10 minutes
-                    await cache_set(inventory_cache_key, catalogue, ttl=600)
-                context.relevant_products = catalog_search.with_sheets_of_the_turn(
-                    catalog_search.rank(catalogue, context.message_body, context.conversation_history),
-                    context.message_body, context.conversation_history,
+            # Any other message («¿qué incluye el plan mensual?» is a general question) gets the products it
+            # names, with their sheets, and no sample of the catalogue (Y-103)
+            wants_catalogue = context.intent in [
+                "product_inquiry", "pricing_question", "availability_check", "purchase_intent"
+            ] or purchase_confirmation.confirms_offer(context.message_body, context.conversation_history) or (
+                context.current_state in (
+                    ConversationState.CART_BUILDING, ConversationState.FULFILLMENT_COORD,
+                    ConversationState.AWAITING_PAYMENT_METHOD,
                 )
+            )
+            # The whole catalogue is cached (the old key held only 5 products); v2 has kind and sheet (Y-103)
+            inventory_cache_key = build_inventory_cache_key(context.tenant_id) + ":catalogue:v2"
+            catalogue = await cache_get(inventory_cache_key)
+            if catalogue is not None:
+                self.log_info("inventory_from_cache", tenant_id=context.tenant_id)
+            else:
+                catalogue = await self._load_catalogue(db, context.tenant_id)
+                # Cache inventory for 10 minutes
+                await cache_set(inventory_cache_key, catalogue, ttl=600)
+            if wants_catalogue:
+                ranked = catalog_search.rank(catalogue, context.message_body, context.conversation_history)
+            else:
+                ranked = catalog_search.named(catalogue, context.message_body, context.conversation_history)
+            context.relevant_products = catalog_search.with_sheets_of_the_turn(
+                ranked, context.message_body, context.conversation_history,
+            )
             
             # Lead info already populated by IdentificationStage — skip re-query
             if not context.lead_info:

@@ -759,7 +759,13 @@ class ActionExecutorStage(BasePipelineStage):
             )
             llm_usage.record(context, "sales.checkout_extraction", model, response)
             result = json.loads(response.choices[0].message.content.strip())
-            return {k: v for k, v in result.items() if k in required_fields and v}
+            # The model sometimes shortens a long field name («Modalidad del servicio»): map it back (Y-103)
+            extracted = {}
+            for key, value in result.items():
+                field = delivery.match_field(str(key), missing)
+                if field and value and not isinstance(value, (dict, list)):
+                    extracted[field] = value
+            return extracted
         except Exception as e:
             self.log_error("checkout_extraction_failed", error=str(e))
             return {}
@@ -945,6 +951,13 @@ class ActionExecutorStage(BasePipelineStage):
         extracted = await self._extract_checkout_fields(
             context.message_body, required_fields, context.checkout_data, context=context
         )
+        # «Virtual», «en el local», «a domicilio»: the modality of a service, without the model (Y-103)
+        if delivery.MODALITY_FIELD in required_fields and not context.checkout_data.get(delivery.MODALITY_FIELD) \
+                and not extracted.get(delivery.MODALITY_FIELD):
+            modality = delivery.detect_modality(context.message_body,
+                                                home_allowed=delivery.only_services(context.cart_contents))
+            if modality:
+                extracted[delivery.MODALITY_FIELD] = modality
         if extracted:
             context.checkout_data.update(extracted)
             context.cart_contents["checkout_data"] = context.checkout_data

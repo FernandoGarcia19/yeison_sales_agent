@@ -84,6 +84,15 @@ def rank(products: List[Dict[str, Any]], message: Optional[str],
     return [product for _, _, product in sorted(scored, key=lambda item: item[:2])[:top]]
 
 
+def named(products: List[Dict[str, Any]], message: Optional[str],
+          history: Optional[List[Dict[str, Any]]] = None, top: int = TOP) -> List[Dict[str, Any]]:
+    """Only the products the conversation names (no sample of the catalogue), best first."""
+    asked, earlier = words(message), _earlier(history)
+    scored = [(-score, position, product) for position, product in enumerate(products)
+              if (score := _score(product, asked, earlier))]
+    return [product for _, _, product in sorted(scored, key=lambda item: item[:2])[:top]]
+
+
 def with_sheets_of_the_turn(products: List[Dict[str, Any]], message: Optional[str],
                             history: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """The ranked products, keeping the sheet only of those the conversation names: the sample of a

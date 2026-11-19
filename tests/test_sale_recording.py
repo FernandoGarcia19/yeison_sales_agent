@@ -156,3 +156,56 @@ async def test_a_sale_without_the_request_has_none(factory):
     await tw.process_telegram_callback(f"approve_sale_{order['conversation_id']}", chat_id=1, message_id=1)
     [sale] = await _sales(factory, order["conversation_id"])
     assert sale.invoice_request is None
+
+
+async def _customer(factory, customer_id):
+    async with factory() as db:
+        return (await db.execute(text(
+            "select id, tenant_id, phone, name, document_id, last_purchase_at from customer where id = :i"),
+            {"i": customer_id})).one()
+
+
+async def test_a_sale_links_the_customer_by_phone(factory):
+    """Y-70: the sale and its lead point to the business's customer, created from the phone."""
+    order = await _order(factory, cart_extra={"invoice_requested": True, "checkout_data": {
+        "Nombre completo": "Carla M.", "NIT o CI para la factura": "4567890", "Razón social para la factura": "Carla SRL"}})
+    await tw.process_telegram_callback(f"approve_sale_{order['conversation_id']}", chat_id=1, message_id=1)
+    [sale] = await _sales(factory, order["conversation_id"])
+    customer = await _customer(factory, sale.customer_id)
+    assert customer.tenant_id == order["tenant_id"] and customer.phone == "59170000001"
+    assert customer.name == "Carla M." and customer.document_id == "4567890"  # not the razón social
+    assert customer.last_purchase_at == sale.sale_date
+    async with factory() as db:
+        lead_customer = (await db.execute(text("select customer_id from lead where id = :i"),
+                                          {"i": order["lead_id"]})).scalar_one()
+    assert lead_customer == customer.id
+
+
+async def test_one_customer_per_business_and_phone(factory):
+    first = await _order(factory)
+    await tw.process_telegram_callback(f"approve_sale_{first['conversation_id']}", chat_id=1, message_id=1)
+    [sale_a] = await _sales(factory, first["conversation_id"])
+
+    # Another purchase cycle of the same customer: a new lead on the same conversation
+    async with factory() as db:
+        import json
+        await db.execute(text(
+            "update sales_conversation set current_state = 'awaiting_receipt', cart_contents = cast(:cart as jsonb) "
+            "where id = :c"),
+            {"c": first["conversation_id"], "cart": json.dumps({
+                "items": [{"id": 1, "name": "Zapatilla", "price": 10, "quantity": 1}], "payment_method": "qr",
+                "payment_proof_submitted": True})})
+        await db.execute(text(
+            "insert into lead (tenant_id, agent_instance_id, phone, status, active, created_at, conversation_id) "
+            "values (:t, :a, '59170000001', 'converted', true, now(), :c)"),
+            {"t": first["tenant_id"], "a": first["agent_id"], "c": first["conversation_id"]})
+        await db.commit()
+    await tw.process_telegram_callback(f"approve_sale_{first['conversation_id']}", chat_id=1, message_id=1)
+    sales = await _sales(factory, first["conversation_id"])
+    assert len(sales) == 2 and {s.customer_id for s in sales} == {sale_a.customer_id}
+
+    other = await _order(factory)  # another business, the same phone
+    await tw.process_telegram_callback(f"approve_sale_{other['conversation_id']}", chat_id=1, message_id=1)
+    [sale_b] = await _sales(factory, other["conversation_id"])
+    assert sale_b.customer_id != sale_a.customer_id
+    assert (await _customer(factory, sale_b.customer_id)).tenant_id == other["tenant_id"]

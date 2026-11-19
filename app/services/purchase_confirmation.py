@@ -24,7 +24,14 @@ _CLOSING = re.compile(
     r"|\bpedido de " + _QUANTITY + r"\b"
     r"|\b(enviamelo|enviamela|enviamelos|enviamelas|mandamelo|mandamela|mandamelos|mandamelas)\b"
     r"|\b(quiero|quisiera|dame|deme|mandame|ponme|anotame|separame|reservame)( me)? " + _QUANTITY + r"\b"
+    # Services and plans (Y-103): «contrato el plan», «me suscribo», «quiero inscribirme»
+    r"|\bcontrat(o|amos) (el|la|los|las|un|una)\b|\b(quiero|quisiera|voy a) contratar\w*"
+    r"|\bme (suscribo|inscribo|afilio)\b|\b(quiero|quisiera|voy a) (suscribirme|inscribirme|afiliarme)\b"
 )
+
+# «Quiero el plan mensual», «quisiera la asesoría»: a purchase only when this message just put that item in
+# the cart (action_executor checks it); on its own «quiero la información» is not one (Y-103)
+_WANTS_ITEM = re.compile(r"\b(quiero|quisiera|deseo|dame|deme|me llevo|tomo|elijo|prefiero)( me)? (el|la|los|las)\b")
 
 # A short reply that says yes. Only closes the purchase when the agent had just offered it.
 _YES = {"si", "sip", "dale", "ok", "okay", "okey", "oki", "listo", "claro", "perfecto", "va", "vale",
@@ -45,6 +52,10 @@ def normalize(text: Optional[str]) -> str:
 
 def closes_purchase(message: Optional[str]) -> bool:
     return bool(_CLOSING.search(normalize(message)))
+
+
+def asks_for_item(message: Optional[str]) -> bool:
+    return bool(_WANTS_ITEM.search(normalize(message)))
 
 
 def is_affirmative(message: Optional[str]) -> bool:

@@ -277,6 +277,13 @@ class ActionExecutorStage(BasePipelineStage):
             }
             return
 
+        if not is_purchase_confirmed and purchase_confirmation.asks_for_item(context.message_body) and any(
+            c.get("op") == "added" for c in changes
+        ):
+            # «Quiero el Club Moda Andina mensual»: no quantity, but this very message named the item it
+            # wants and it is now in the cart. That is a purchase, like «quiero 2 medias» (Y-103)
+            is_purchase_confirmed = True
+
         if not is_purchase_confirmed:
             # The cart is ready; the customer still has to confirm it
             context.current_state = ConversationState.CART_BUILDING

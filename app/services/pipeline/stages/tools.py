@@ -4,6 +4,8 @@ from langchain_core.tools import tool
 from sqlalchemy import select
 from app.core.database import get_session_factory
 from app.models import InventoryTenant, ConfigurationTenant, AgentInstance, Lead, SalesConversation
+from app.models.inventory import sellable
+from app.services.catalog_search import catalogue_item
 
 class GetTenantInventoryInput(BaseModel):
     tenant_id: int = Field(..., description="The unique identifier of the tenant/business.")
@@ -20,11 +22,10 @@ async def get_tenant_inventory(tenant_id: int, query: str) -> List[Dict[str, Any
     async with session_factory() as db:
         # In a real scenario we'd use similarity search. For now, simple ILIKE matching
         search_pattern = f"%{query}%"
-        from sqlalchemy import or_
         stmt = select(InventoryTenant).where(
             InventoryTenant.tenant_id == tenant_id,
             InventoryTenant.active == True,
-            or_(InventoryTenant.quantity > 0, InventoryTenant.quantity.is_(None)),
+            sellable(),
             (InventoryTenant.product_name.ilike(search_pattern) |
              InventoryTenant.description.ilike(search_pattern))
         ).limit(5)
@@ -32,16 +33,7 @@ async def get_tenant_inventory(tenant_id: int, query: str) -> List[Dict[str, Any
         result = await db.execute(stmt)
         products = result.scalars().all()
         
-        return [
-            {
-                "id": p.id,
-                "name": p.product_name,
-                "price": str(p.price),
-                "quantity": p.quantity,
-                "description": p.description
-            }
-            for p in products
-        ]
+        return [catalogue_item(p) for p in products]
 
 
 class GetTenantPoliciesInput(BaseModel):

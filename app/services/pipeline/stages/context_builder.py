@@ -10,6 +10,7 @@ from app.schemas.pipeline import ConversationState, PipelineContext
 from app.services.pipeline.base import BasePipelineStage
 from app.services import catalog_search, delivery, purchase_confirmation
 from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant, Tenant
+from app.models.inventory import sellable
 from app.core.database import get_session_factory
 from app.core.money import normalize as normalize_currency
 from app.core.redis_client import (
@@ -129,8 +130,9 @@ class ContextBuilderStage(BasePipelineStage):
                     catalogue = await self._load_catalogue(db, context.tenant_id)
                     # Cache inventory for 10 minutes
                     await cache_set(inventory_cache_key, catalogue, ttl=600)
-                context.relevant_products = catalog_search.rank(
-                    catalogue, context.message_body, context.conversation_history
+                context.relevant_products = catalog_search.with_sheets_of_the_turn(
+                    catalog_search.rank(catalogue, context.message_body, context.conversation_history),
+                    context.message_body, context.conversation_history,
                 )
             
             # Lead info already populated by IdentificationStage — skip re-query
@@ -226,6 +228,8 @@ class ContextBuilderStage(BasePipelineStage):
             tenant_config.operations if tenant_config else None,
             business_address=business.get("address") or business.get("location"),
         )
+        # Services (Y-103): whether it works with appointments and goes to the customer's home
+        config["services"] = delivery.services_config(business)
 
         # Prices are written in the business's currency (Bs for a business without one set)
         base_currency = (await db.execute(
@@ -456,28 +460,16 @@ class ContextBuilderStage(BasePipelineStage):
         db: AsyncSession,
         tenant_id: int,
     ) -> list[dict]:
-        """The business's active products in stock; catalog_search picks the ones of each turn."""
-
-        from sqlalchemy import or_
+        """The business's active products in stock, and its services and plans (no stock, Y-103);
+        catalog_search picks the ones of each turn."""
         stmt = select(InventoryTenant).where(
             InventoryTenant.tenant_id == tenant_id,
             InventoryTenant.active == True,
-            or_(InventoryTenant.quantity > 0, InventoryTenant.quantity.is_(None))
+            sellable(),
         ).order_by(InventoryTenant.id).limit(catalog_search.MAX_CATALOGUE)
-        
+
         result = await db.execute(stmt)
-        products = result.scalars().all()
-        
-        return [
-            {
-                "id": p.id,
-                "name": p.product_name,
-                "price": str(p.price),
-                "quantity": p.quantity,
-                "description": p.description
-            }
-            for p in products
-        ]
+        return [catalog_search.catalogue_item(p) for p in result.scalars().all()]
     
     async def _load_lead_info(
         self,

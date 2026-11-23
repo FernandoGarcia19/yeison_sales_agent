@@ -94,6 +94,9 @@ class PipelineContext(BaseModel):
         description="Relevant inventory items"
     )
     lead_info: Optional[Dict[str, Any]] = Field(None, description="Lead information")
+    last_order: Optional[Dict[str, Any]] = Field(
+        None, description="The customer's last sale, when they ask for their order (Y-71, order_status.last_order)"
+    )
 
     # Agentic reasoning
     agent_scratchpad: List[Dict[str, Any]] = Field(

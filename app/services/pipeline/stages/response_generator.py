@@ -12,7 +12,7 @@ from app.integrations.whatsapp.client import send_whatsapp_message
 from app.integrations.whatsapp.formatting import to_whatsapp
 from app.core.config import settings
 from app.core.money import label as currency_label, money
-from app.services import cart, delivery, product_sheet
+from app.services import cart, delivery, handoff, order_status, product_sheet
 from app.services import llm_usage
 from app.services.pipeline.llm_models import model_for, request_options
 
@@ -535,6 +535,9 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
                 prompt += f"Nombre: {lead_name}\n"
                 prompt += f"Estado: {context.lead_info.get('status', 'nuevo')}\n\n"
         
+        # The customer asked for an order already placed (Y-71)
+        prompt += order_status.prompt_block(context.last_order)
+
         # The cart as the code left it: the only order there is (Y-56)
         items = (context.cart_contents or {}).get("items") or []
         if items:
@@ -819,6 +822,17 @@ NO repitas lo que el usuario dijo, simplemente responde de manera natural y úti
                         action_type=context.action_type
                     )
                 
+                # A person paused the agent from the panel while this turn ran (Y-69): keep the pause,
+                # and go back to the state this turn reached when they resume it
+                stored_cart = conversation.cart_contents or {}
+                stored_state = getattr(conversation.current_state, "value", conversation.current_state)
+                new_state = getattr(context.current_state, "value", context.current_state)
+                if stored_state == "paused" and new_state != "paused" and handoff.is_paused(stored_cart):
+                    context.cart_contents = dict(context.cart_contents or {})
+                    context.cart_contents["state_before_pause"] = new_state or stored_cart.get("state_before_pause")
+                    context.cart_contents["paused_until"] = stored_cart["paused_until"]
+                    context.current_state = ConversationState.PAUSED
+
                 # Update state machine fields
                 if context.current_state is not None:
                     conversation.current_state = context.current_state

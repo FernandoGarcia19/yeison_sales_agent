@@ -47,6 +47,16 @@ def build_sale_items(cart_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return lines
 
 
+def build_delivery(cart_contents: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """What the customer gave at checkout, kept with the sale for the panel's Sales screen (Y-71)."""
+    data = {str(k): str(v).strip() for k, v in (cart_contents.get("checkout_data") or {}).items()
+            if v is not None and str(v).strip()}
+    method = cart_contents.get("delivery_method")
+    if not data and not method:
+        return None
+    return {"method": method, "data": data}
+
+
 async def record_sale(
     db: AsyncSession,
     conversation: SalesConversation,
@@ -123,6 +133,7 @@ async def record_sale(
         currency=base_currency,
         invoice_request=invoice,
         payment_reference=payment_reference,
+        delivery=build_delivery(cart_contents),
     )
     db.add(sale)
     await db.flush()

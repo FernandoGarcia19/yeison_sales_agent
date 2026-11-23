@@ -10,6 +10,7 @@ from app.api.v1.webhooks import router as webhook_router
 from app.api.v1.telegram_webhook import router as telegram_webhook_router
 from app.api.v1.internal_payments import router as internal_payments_router
 from app.api.v1.internal_simulator import router as internal_simulator_router
+from app.api.v1.internal_conversations import router as internal_conversations_router
 from app.services import bank_qr, batch_manager
 
 
@@ -51,6 +52,7 @@ app.include_router(webhook_router, prefix="/api/v1")
 app.include_router(telegram_webhook_router, prefix="/api/v1")
 app.include_router(internal_payments_router, prefix="/api/v1")
 app.include_router(internal_simulator_router, prefix="/api/v1")
+app.include_router(internal_conversations_router, prefix="/api/v1")
 
 # Basic route
 @app. get("/")

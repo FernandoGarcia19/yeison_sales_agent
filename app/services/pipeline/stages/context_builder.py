@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.pipeline import ConversationState, PipelineContext
 from app.services.pipeline.base import BasePipelineStage
-from app.services import catalog_search, delivery, purchase_confirmation
+from app.services import catalog_search, delivery, order_status, purchase_confirmation
 from app.models import SalesConversation, InventoryTenant, Lead, AgentInstance, ConfigurationTenant, Tenant
 from app.models.inventory import sellable
 from app.core.database import get_session_factory
@@ -149,6 +149,11 @@ class ContextBuilderStage(BasePipelineStage):
                     context.tenant_id,
                     context.sender_phone
                 )
+
+            # «¿Dónde está mi pedido?» (Y-71): the last sale as the business left it. Only outside a
+            # purchase in progress: there «¿cuándo llega?» is about the order being built.
+            if context.current_state in (None, ConversationState.BROWSING, ConversationState.ORDER_COMPLETED)                     and order_status.asks_for_order(context.message_body):
+                context.last_order = await order_status.last_order(db, context.tenant_id, context.conversation_id)
         
         # State-based instructions for the system prompt used to be built here, from
         # context.current_state/checkout_data as loaded at the *start* of the turn - but

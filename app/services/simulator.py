@@ -13,6 +13,7 @@ buttons) and reset.
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -23,6 +24,7 @@ from app.core import simulation
 from app.core.database import get_engine
 from app.core.redis_client import acquire_lock, cache_delete, cache_get, cache_set, release_lock
 from app.models import AgentInstance, Lead, SalesConversation
+from app.models.sale import Sale
 
 logger = structlog.get_logger()
 
@@ -177,6 +179,21 @@ async def _seed(db: AsyncSession, agent: AgentInstance, phone: str, state: Dict[
     )
     db.add(conversation)
     await db.flush()
+    previous_sale = state.get("last_sale")
+    if previous_sale:  # the sale of an earlier turn, so «¿dónde está mi pedido?» finds it (Y-71)
+        bought = Lead(tenant_id=agent.tenant_id, agent_instance_id=agent.id, phone=phone, name=CUSTOMER_NAME,
+                      source="simulator", status="converted", conversation_id=conversation.id)
+        db.add(bought)
+        await db.flush()
+        db.add(Sale(
+            tenant_id=agent.tenant_id, lead_id=bought.id, agent_instance_id=agent.id,
+            sales_conversation_id=conversation.id, sale_date=datetime.fromisoformat(previous_sale["sale_date"]),
+            status=previous_sale.get("status") or "completed", subtotal=Decimal(previous_sale["total_amount"]),
+            total_amount=Decimal(previous_sale["total_amount"]), payment_method=previous_sale.get("payment_method"),
+            payment_status=previous_sale.get("payment_status"), sale_items=previous_sale.get("sale_items") or [],
+            currency=previous_sale.get("currency"), fulfillment_status="pending",
+        ))
+        await db.flush()
     lead_state = state.get("lead") or {}
     lead = Lead(tenant_id=agent.tenant_id, agent_instance_id=agent.id, phone=phone,
                 name=lead_state.get("name") or CUSTOMER_NAME, source="simulator",
@@ -226,7 +243,15 @@ async def _read_back(db: AsyncSession, conversation_id: int, previous: Dict[str,
     lead = (await db.execute(
         select(Lead).where(Lead.conversation_id == conversation_id).order_by(Lead.id.desc()).limit(1)
     )).scalar_one_or_none()
+    sale = (await db.execute(
+        select(Sale).where(Sale.sales_conversation_id == conversation_id).order_by(Sale.id.desc()).limit(1)
+    )).scalar_one_or_none()
     return {
+        "last_sale": {
+            "sale_date": sale.sale_date.isoformat(), "status": sale.status, "total_amount": str(sale.total_amount),
+            "payment_method": sale.payment_method, "payment_status": sale.payment_status,
+            "sale_items": sale.sale_items, "currency": sale.currency,
+        } if sale else previous.get("last_sale"),
         "messages": list(conversation.messages or []),
         "current_state": conversation.current_state,
         "cart_contents": dict(conversation.cart_contents or {}),

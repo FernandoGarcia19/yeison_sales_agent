@@ -12,7 +12,7 @@ from app.integrations.whatsapp.client import send_whatsapp_message
 from app.integrations.whatsapp.formatting import to_whatsapp
 from app.core.config import settings
 from app.core.money import label as currency_label, money
-from app.services import cart, delivery, handoff, product_sheet
+from app.services import cart, delivery, handoff, order_status, product_sheet
 from app.services import llm_usage
 from app.services.pipeline.llm_models import model_for, request_options
 
@@ -535,6 +535,9 @@ CONFIANZA: {context.intent_confidence if context.intent_confidence else 0}
                 prompt += f"Nombre: {lead_name}\n"
                 prompt += f"Estado: {context.lead_info.get('status', 'nuevo')}\n\n"
         
+        # The customer asked for an order already placed (Y-71)
+        prompt += order_status.prompt_block(context.last_order)
+
         # The cart as the code left it: the only order there is (Y-56)
         items = (context.cart_contents or {}).get("items") or []
         if items:

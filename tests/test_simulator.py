@@ -202,6 +202,10 @@ async def test_supervisor_approval_is_simulated(business, redis):
     texts = [e["text"] for e in view["events"]]
     assert any("confirmada" in t for t in texts)  # the customer's WhatsApp
     assert any("Se descontaría del stock: Polera básica x2" in t for t in texts)
+    # The sale is kept for the next turns («¿dónde está mi pedido?», Y-71), though nothing was written
+    stored = json.loads(redis[key])
+    assert stored["last_sale"]["payment_status"] == "pending"
+    assert [i["name"] for i in stored["last_sale"]["sale_items"]] == ["Polera básica"]
 
 
 @needs_db
@@ -274,3 +278,31 @@ async def test_endpoint_needs_the_internal_key(monkeypatch):
         bad = {**body, "session_id": "NOT-HEX!"}
         assert (await client.post("/api/v1/internal/simulator/turn", json=bad,
                                   headers={"x-internal-key": "i" * 40})).status_code == 422
+
+
+@needs_db
+async def test_the_sale_of_an_earlier_turn_is_found_again(business):
+    """Y-71: the next turn seeds the sale back, behind its own lead, so a new purchase still records."""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from app.services import order_status
+
+    state = simulator._empty_state()
+    state["last_sale"] = {"sale_date": "2026-11-20T15:00:00", "status": "completed", "total_amount": "50.00",
+                          "payment_method": "physical", "payment_status": "pending", "currency": "BOB",
+                          "sale_items": [{"product_id": 1, "name": "Polera básica", "quantity": 2,
+                                          "unit_price": "25.00", "line_total": "50.00"}]}
+    async with business["engine"].connect() as connection:
+        transaction = await connection.begin()
+        factory = async_sessionmaker(bind=connection, class_=AsyncSession, expire_on_commit=False,
+                                     join_transaction_mode="create_savepoint")
+        async with factory() as db:
+            agent = await db.get(simulator.AgentInstance, business["agent_id"])
+            conversation, lead = await simulator._seed(db, agent, "simdeadbeef", state)
+            order = await order_status.last_order(db, business["tenant_id"], conversation.id)
+            assert order["found"] and order["items"] == ["2 x Polera básica"]
+            assert order["status"] == "recibido, todavía por preparar" and order["total"] == "Bs 50.00"
+            # the current lead is newer than the one of the old sale: record_sale makes a new sale
+            assert lead.status == "new"
+            assert (await order_status.last_order(db, business["tenant_id"] + 999999, conversation.id)) == {
+                "found": False}
+        await transaction.rollback()

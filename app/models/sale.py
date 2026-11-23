@@ -41,6 +41,13 @@ class Sale(Base):
     invoice_request: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     # Bank QR: alias of the paid QR (unique, so a payment is never recorded twice)
     payment_reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # Y-71: where the order is (pending, preparing, shipped, delivered), set by the business in the panel
+    fulfillment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending",
+                                                    server_default="pending")
+    # Y-71: checkout data kept with the sale: {"method": "delivery" | "pickup" | null, "data": {label: value}}
+    delivery: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    # Y-71: a cancelled sale keeps its row with status = 'cancelled'
+    cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

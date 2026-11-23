@@ -1,0 +1,21 @@
+# Y-71: after an order is confirmed the customer asks for it. The agent reads the sale's fulfillment
+# status (a new sale is «pending»: recibido, por preparar) and never invents a delivery time.
+# The test chat keeps the sale of the approval turn for the next turns (simulator.last_sale).
+name = "¿Dónde está mi pedido? responde con el estado de la última venta"
+agent = "moda"
+
+[[turns]]
+say = "Quiero 2 packs de medias"
+expect = { state = "fulfillment_coord", cart = { "Medias pack x3" = 2 } }
+
+[[turns]]
+say = "Luis Mamani, envíamelo a Av. 6 de Agosto 100"
+expect = { state = "awaiting_receipt", payment = "physical", supervisor = true, actions = ["approve", "reject"] }
+
+[[turns]]
+action = "approve"
+expect = { state = "order_completed", says = ["confirmada"] }
+
+[[turns]]
+say = "Hola, ¿dónde está mi pedido?"
+expect = { says_any = [["preparar", "recibido", "preparación"]], not_matches = ["(?i)no tienes? (ning[uú]n )?pedido", "(?i)llega(r[aá])? (hoy|mañana|en [0-9])", "(?i)[0-9]{1,2}:[0-9]{2}"] }

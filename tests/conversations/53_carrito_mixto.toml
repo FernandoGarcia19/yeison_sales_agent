@@ -1,0 +1,12 @@
+# Y-103: a product and a service in one order: the product is still delivered or picked up, the
+# service asks for its modality. Seed: tools/seed_services.py
+name = "Carrito mixto: producto con entrega y servicio con modalidad"
+agent = "moda"
+
+[[turns]]
+say = "Quiero 1 chompa de alpaca y una asesoría de estilo"
+expect = { state = "fulfillment_coord", cart = { "Chompa de alpaca" = 1, "Asesoría de estilo" = 1 } }
+
+[[turns]]
+say = "Paso a recoger la chompa a la tienda y la asesoría en el local, soy Ana Rojas"
+expect = { state = "awaiting_receipt", collected = ["Nombre completo", "Entrega (retiro en tienda o envío)", "Modalidad del servicio (en el local, a domicilio o virtual)"], supervisor = true }

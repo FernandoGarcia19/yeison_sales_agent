@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.schemas.pipeline import PipelineContext
 from app.services.pipeline.base import BasePipelineStage, IdentificationError
 from app.models import AgentInstance, SalesConversation, Lead
+from app.services.customers import ensure_customer
 from app.core import simulation
 from app.core.database import get_session_factory
 from app.core.redis_client import (
@@ -202,6 +203,7 @@ class IdentificationStage(BasePipelineStage):
             name=profile_name,
             source="whatsapp",
             status="new",
+            customer_id=await ensure_customer(db, tenant_id, clean_phone, profile_name),
         )
         db.add(lead)
         await db.flush()

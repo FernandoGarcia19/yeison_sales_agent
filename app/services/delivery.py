@@ -10,11 +10,16 @@ The panel and the onboarding write it in `configuration_tenant.operations`:
 Older businesses have `delivery` as one sentence. The agent only states what is written here; for
 any other place or cost it says it will check with the team (it used to promise deliveries to any
 city). The checkout asks for an address only when the order is delivered.
+
+Services and plans (Y-103) are not delivered: a cart of only services and plans asks for the modality
+of the service (local, a domicilio, virtual) when there is a choice and, if the business works with
+appointments, the day and time the customer prefers; a person of the team confirms it.
 """
 
 import re
 from typing import Any, Dict, List, Optional
 
+from app.services import product_sheet
 from app.services.invoice_request import checkout_requirements as _with_invoice
 from app.services.purchase_confirmation import normalize
 
@@ -25,6 +30,11 @@ DELIVERY = "delivery"
 METHOD_FIELD = "Entrega (retiro en tienda o envío)"
 NAME_FIELD = "Nombre completo"
 ADDRESS_FIELD = "Dirección de entrega"
+# Services (Y-103)
+MODALITY_FIELD = "Modalidad del servicio (en el local, a domicilio o virtual)"
+PREFERRED_TIME_FIELD = "Día y hora que prefiere"
+_DELIVERY_FIELD = re.compile(r"direcci|entrega|env[ií]o|retiro|domicilio", re.I)
+_NAME_FIELD = re.compile(r"nombre", re.I)
 
 _PICKUP_WORDS = re.compile(r"\b(retir\w*|recog\w*|recoj\w*|paso a|pasare|paso por|voy a la tienda|en tienda|en la tienda|en el local)\b")
 _DELIVERY_WORDS = re.compile(r"\b(envi\w*|deliver\w*|delivery|domicilio|a mi casa|mandar\w*|mandame\w*|traer\w*|traigan|lleven|llevar\w*)\b")
@@ -66,6 +76,32 @@ def methods(options: Dict[str, Any]) -> List[str]:
     """What the customer can choose. Unknown (nothing or only a sentence): both, the customer says."""
     chosen = [m for m in (PICKUP, DELIVERY) if options.get(m)]
     return chosen or [PICKUP, DELIVERY]
+
+
+_VIRTUAL_WORDS = re.compile(r"\b(virtual\w*|online|on line|en linea|por (video)?llamada|videollamada|zoom|meet|remot\w*)\b")
+_LOCAL_WORDS = re.compile(r"\b(en el local|en la tienda|en tienda|en su local|en el negocio|presencial\w*|voy al local|ir al local)\b")
+_HOME_WORDS = re.compile(r"\b(a domicilio|domicilio|a mi casa|en mi casa|vengan a|vengas a)\b")
+
+
+def detect_modality(message: Optional[str], home_allowed: bool = True) -> Optional[str]:
+    """How the customer wants a service (Y-103): «Virtual», «En el local» or «A domicilio»; None if unclear.
+    In a mixed cart «a domicilio» is the delivery of the products, so it only counts when `home_allowed`."""
+    text = normalize(message)
+    found = [label for label, words, allowed in (("Virtual", _VIRTUAL_WORDS, True), ("En el local", _LOCAL_WORDS, True),
+                                                   ("A domicilio", _HOME_WORDS, home_allowed))
+             if allowed and words.search(text)]
+    return found[0] if len(found) == 1 else None
+
+
+def match_field(key: str, fields: List[str]) -> Optional[str]:
+    """The required field a key from the model names, even shortened: «Modalidad del servicio» → its full name."""
+    if key in fields:
+        return key
+    plain = normalize(key).strip()
+    if not plain:
+        return None
+    candidates = [f for f in fields if normalize(f).startswith(plain) or plain.startswith(normalize(f).split(" (")[0])]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def detect_method(message: Optional[str]) -> Optional[str]:
@@ -125,12 +161,44 @@ def prompt_section(options: Dict[str, Any]) -> str:
     return head + rule
 
 
+def services_config(business: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the checkout of a service needs from the business's rubro answers (panel, Etapa 3)."""
+    answers = (business or {}).get("industry_answers") or {}
+    home = answers.get("home_service")
+    return {"appointments": answers.get("appointments") is True,
+            "home_service": home if isinstance(home, bool) else None}
+
+
+def only_services(cart_contents: Optional[Dict[str, Any]]) -> bool:
+    return product_sheet.only_services((cart_contents or {}).get("items") or [])
+
+
+def _service_fields(config: Dict[str, Any]) -> List[str]:
+    """A cart of services and plans: the name and the agent's own fields that are not about delivery."""
+    own = [f for f in (config.get("checkout_requirements") or []) if isinstance(f, str) and not _DELIVERY_FIELD.search(f)]
+    return own if any(_NAME_FIELD.search(f) for f in own) else [NAME_FIELD] + own
+
+
 def requirements(agent_config: Optional[Dict[str, Any]], cart_contents: Optional[Dict[str, Any]]) -> List[str]:
-    """Checkout fields: the agent's own list if it has one; otherwise by delivery method. Invoice data on top."""
+    """Checkout fields: the agent's own list if it has one; otherwise by delivery method. Invoice data on top.
+    Services and plans are not delivered (Y-103): a service asks for its modality when there is a choice and,
+    if the business works with appointments, for the day and time the customer prefers."""
     config = agent_config or {}
     cart = cart_contents or {}
-    by_method = checkout_fields(config.get("delivery") or from_operations(None), cart.get("delivery_method"))
-    return _with_invoice(config.get("checkout_requirements"), bool(cart.get("invoice_requested")), default=by_method)
+    items = cart.get("items") or []
+    invoice = bool(cart.get("invoice_requested"))
+    if product_sheet.only_services(items):
+        fields = _with_invoice(None, invoice, default=_service_fields(config))
+    else:
+        by_method = checkout_fields(config.get("delivery") or from_operations(None), cart.get("delivery_method"))
+        fields = _with_invoice(config.get("checkout_requirements"), invoice, default=by_method)
+    if product_sheet.has_services(items):
+        services = config.get("services") or {}
+        if not product_sheet.single_modality(items, services.get("home_service")) and MODALITY_FIELD not in fields:
+            fields.insert(0, MODALITY_FIELD)
+        if services.get("appointments") and PREFERRED_TIME_FIELD not in fields:
+            fields.append(PREFERRED_TIME_FIELD)
+    return fields
 
 
 def method_label(method: Optional[str]) -> Optional[str]:

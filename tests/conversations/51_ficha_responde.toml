@@ -1,0 +1,13 @@
+# Y-103: the answer is only in the sheet of the service (a question of its FAQ), and what the sheet
+# does not say is checked with the team instead of made up. «No sé si hay estacionamiento» is not a yes:
+# only «sí» with its accent, or «si» opening a sentence, count. Seed: tools/seed_services.py
+name = "La ficha responde y lo que no está no se inventa"
+agent = "moda"
+
+[[turns]]
+say = "En la asesoría de estilo, ¿puedo llevar a una amiga?"
+expect = { says_any = ["sin costo", "sin cargo", "gratis"] }
+
+[[turns]]
+say = "¿Y la asesoría de estilo tiene estacionamiento para el auto?"
+expect = { says_any = ["consult", "equipo", "confirm", "averigu"], not_matches = ['sí,? (hay|tenemos|contamos con) estacionamiento', '(^|[.!?¡¿]\s*)si,? (hay|tenemos|contamos con) estacionamiento'] }

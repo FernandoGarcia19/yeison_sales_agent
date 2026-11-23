@@ -1,0 +1,16 @@
+# Y-103: a monthly plan (no stock): it answers what it includes from its sheet and closes with only
+# the name, no delivery. Seed: tools/seed_services.py
+name = "Plan mensual: qué incluye y se cierra sin envío"
+agent = "moda"
+
+[[turns]]
+say = "¿Qué incluye el Club Moda Andina mensual?"
+expect = { says = ["10"], not_matches = ['(?i)quedan? [0-9]', "(?i)en stock"] }
+
+[[turns]]
+say = "Quiero el Club Moda Andina mensual"
+expect = { state = "fulfillment_coord", cart = { "Club Moda Andina mensual" = 1 }, not_matches = ["(?i)env[ií]o", "(?i)retiro en tienda"] }
+
+[[turns]]
+say = "Ana Rojas"
+expect = { state = "awaiting_receipt", collected = ["Nombre completo"], supervisor = true }

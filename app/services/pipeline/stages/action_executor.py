@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.core.money import money
 from app.services import bank_qr, cart, delivery, handoff, invoice_request, llm_usage, purchase_confirmation
 from app.services.pipeline.llm_models import model_for, request_options
+from app.services.customers import ensure_customer
 
 
 # Before payment the cart can still change (Y-56)
@@ -194,6 +195,8 @@ class ActionExecutorStage(BasePipelineStage):
         """«Paso a recogerlo» / «envíamelo a casa»: how the order leaves the shop decides what is asked."""
         if context.current_state not in (None, ConversationState.BROWSING, *CART_STATES):
             return
+        if delivery.only_services(context.cart_contents):
+            return  # a service is not delivered: «a domicilio» is its modality (Y-103)
         method = delivery.detect_method(context.message_body)
         options = (context.agent_config or {}).get("delivery") or delivery.from_operations(None)
         if method and method in delivery.methods(options):
@@ -273,6 +276,13 @@ class ActionExecutorStage(BasePipelineStage):
                 "cart_changes": cart.describe_changes(changes),
             }
             return
+
+        if not is_purchase_confirmed and purchase_confirmation.asks_for_item(context.message_body) and any(
+            c.get("op") == "added" for c in changes
+        ):
+            # «Quiero el Club Moda Andina mensual»: no quantity, but this very message named the item it
+            # wants and it is now in the cart. That is a purchase, like «quiero 2 medias» (Y-103)
+            is_purchase_confirmed = True
 
         if not is_purchase_confirmed:
             # The cart is ready; the customer still has to confirm it
@@ -756,7 +766,13 @@ class ActionExecutorStage(BasePipelineStage):
             )
             llm_usage.record(context, "sales.checkout_extraction", model, response)
             result = json.loads(response.choices[0].message.content.strip())
-            return {k: v for k, v in result.items() if k in required_fields and v}
+            # The model sometimes shortens a long field name («Modalidad del servicio»): map it back (Y-103)
+            extracted = {}
+            for key, value in result.items():
+                field = delivery.match_field(str(key), missing)
+                if field and value and not isinstance(value, (dict, list)):
+                    extracted[field] = value
+            return extracted
         except Exception as e:
             self.log_error("checkout_extraction_failed", error=str(e))
             return {}
@@ -904,6 +920,7 @@ class ActionExecutorStage(BasePipelineStage):
         from sqlalchemy import update as sa_update
         session_factory = get_session_factory()
         async with session_factory() as db:
+            new_lead.customer_id = await ensure_customer(db, context.tenant_id, clean_phone, customer_name)
             db.add(new_lead)
             await db.flush()
             await db.execute(
@@ -941,14 +958,25 @@ class ActionExecutorStage(BasePipelineStage):
         extracted = await self._extract_checkout_fields(
             context.message_body, required_fields, context.checkout_data, context=context
         )
+        # «Virtual», «en el local», «a domicilio»: the modality of a service, without the model (Y-103)
+        if delivery.MODALITY_FIELD in required_fields and not context.checkout_data.get(delivery.MODALITY_FIELD) \
+                and not extracted.get(delivery.MODALITY_FIELD):
+            modality = delivery.detect_modality(context.message_body,
+                                                home_allowed=delivery.only_services(context.cart_contents))
+            if modality:
+                extracted[delivery.MODALITY_FIELD] = modality
         if extracted:
             context.checkout_data.update(extracted)
             context.cart_contents["checkout_data"] = context.checkout_data
             self.log_info("checkout_fields_extracted", fields=list(extracted.keys()))
 
         # "Retiro en tienda" or "envío" decides whether an address is needed (Y-58)
+        if delivery.only_services(context.cart_contents):
+            # Services and plans are not delivered (Y-103)
+            context.cart_contents.pop("delivery_method", None)
+            context.checkout_data.pop(delivery.METHOD_FIELD, None)
         choice = context.checkout_data.get(delivery.METHOD_FIELD)
-        if choice and not context.cart_contents.get("delivery_method"):
+        if choice and not context.cart_contents.get("delivery_method") and not delivery.only_services(context.cart_contents):
             method = delivery.detect_method(choice)
             if method:
                 context.cart_contents["delivery_method"] = method
@@ -1226,14 +1254,14 @@ class ActionExecutorStage(BasePipelineStage):
                 # Cart wins; relevant_products is only the inventory match (with stock counts as quantity).
                 products = context.cart_contents.get("items") or context.relevant_products
                 total = sum(
-                    float(p.get("price", 0)) * int(p.get("quantity", 1)) for p in products
+                    float(p.get("price", 0)) * int(p.get("quantity") or 1) for p in products
                 )
                 sale_data = {
                     "phone": context.sender_phone,
                     "items": [
                         {
                             "name": p.get("name") or p.get("product_name", "Producto"),
-                            "quantity": p.get("quantity", 1),
+                            "quantity": p.get("quantity") or 1,
                             "price": float(p.get("price", 0)),
                         }
                         for p in products
@@ -1345,7 +1373,7 @@ class ActionExecutorStage(BasePipelineStage):
         context.cart_contents["payment_proof_submitted"] = True
 
         products = context.cart_contents.get("items") or context.relevant_products
-        total = sum(float(p.get("price", 0)) * int(p.get("quantity", 1)) for p in products)
+        total = sum(float(p.get("price", 0)) * int(p.get("quantity") or 1) for p in products)
 
         # Telegram notification with approve/reject buttons (no receipt file)
         tg_config = (context.agent_config.get("integrations") or {}).get("telegram") or {}
@@ -1358,7 +1386,7 @@ class ActionExecutorStage(BasePipelineStage):
                 "items": [
                     {
                         "name": p.get("name") or p.get("product_name", "Producto"),
-                        "quantity": p.get("quantity", 1),
+                        "quantity": p.get("quantity") or 1,
                         "price": float(p.get("price", 0)),
                     }
                     for p in products

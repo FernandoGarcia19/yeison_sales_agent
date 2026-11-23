@@ -1,0 +1,13 @@
+# Y-103: «Asesoría de estilo» is a service (no stock, its quantity is 0). Before, the agent did not
+# load it at all; now it sells it, never caps it nor says how many are left, and asks for its modality
+# (its sheet says «En el local o virtual»), not for delivery. Seed: tools/seed_services.py
+name = "Servicio sin stock: se vende, sin «quedan N» y sin envío"
+agent = "moda"
+
+[[turns]]
+say = "Quiero 2 sesiones de asesoría de estilo"
+expect = { state = "fulfillment_coord", cart = { "Asesoría de estilo" = 2 }, not_matches = ['(?i)quedan? [0-9]', "(?i)en stock", "(?i)agotad", "(?i)env[ií]o", "(?i)direcci[oó]n de entrega"] }
+
+[[turns]]
+say = "Virtual, a nombre de Ana Rojas"
+expect = { state = "awaiting_receipt", collected = ["Nombre completo", "Modalidad del servicio (en el local, a domicilio o virtual)"], supervisor = true }

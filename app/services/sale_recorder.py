@@ -5,6 +5,7 @@ Called when the supervisor approves an order, or when the bank confirms a QR pay
 the stored cart (Decimal, never float); the LLM never decides them.
 """
 
+import re
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
@@ -15,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentInstance, Lead, SalesConversation, Tenant
 from app.models.sale import Sale
-from app.services.invoice_request import build_invoice_request
+from app.services import customers
+from app.services.invoice_request import _NAME_KEY, build_invoice_request
 
 logger = structlog.get_logger()
 
@@ -89,9 +91,22 @@ async def record_sale(
         select(Tenant.base_currency).where(Tenant.id == agent.tenant_id)
     )).scalar_one_or_none()
 
+    invoice = build_invoice_request(cart_contents)
+    checkout = cart_contents.get("checkout_data") or {}
+    checkout_name = next((str(v).strip() for k, v in checkout.items()
+                          if re.search(r"nombre|name", str(k), re.I) and not _NAME_KEY.search(str(k))
+                          and str(v or "").strip()), None)
+    # Also fills the name and CI/NIT given at checkout where the customer had none
+    customer_id = await customers.ensure_customer(
+        db, agent.tenant_id, lead.phone or conversation.external_user_id, checkout_name or lead.name,
+        (invoice or {}).get("tax_id")) or lead.customer_id
+    if customer_id and not lead.customer_id:
+        lead.customer_id = customer_id
+
     sale = Sale(
         tenant_id=agent.tenant_id,
         lead_id=lead.id,
+        customer_id=customer_id,
         agent_instance_id=agent.id,
         sales_conversation_id=conversation.id,
         sale_date=datetime.utcnow(),
@@ -106,11 +121,13 @@ async def record_sale(
         payment_status="paid" if payment_method == "qr" else "pending",
         sale_items=items,
         currency=base_currency,
-        invoice_request=build_invoice_request(cart_contents),
+        invoice_request=invoice,
         payment_reference=payment_reference,
     )
     db.add(sale)
     await db.flush()
+    if customer_id:
+        await customers.record_purchase(db, customer_id, sale.sale_date)
     logger.info("sale_recorded", sale_id=sale.id, conversation_id=conversation.id,
                 total=str(subtotal), payment_method=payment_method)
     return sale

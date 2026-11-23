@@ -18,6 +18,10 @@ class Sale(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
     lead_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("lead.id"), nullable=False)
+    # Y-70: who bought (copied from the lead)
+    customer_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("customer.id", ondelete="SET NULL"), nullable=True
+    )
     agent_instance_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("agent_instance.id"), nullable=False)
     sales_conversation_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("sales_conversation.id"), nullable=True
